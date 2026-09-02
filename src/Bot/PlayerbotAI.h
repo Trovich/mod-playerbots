@@ -654,6 +654,8 @@ protected:
     Position jumpDestination = Position();
     uint32 nextTransportCheck = 0;
     bool spellInterruptRequested = false;
+    // Timestamp (getMSTime) of the last PvP facing update, used to cap bot turn rate against players
+    uint32 lastPvpFacingMs = 0;
 };
 
 #endif

@@ -1695,6 +1695,33 @@ AiPlayerbot.PvpProhibitedAreaIds = "976,35,392,2268,4161,4010,4317,4312,3649,388
 # Improve reaction speeds in battlegrounds and arenas (may cause lag)
 AiPlayerbot.FastReactInBG = 1
 
+# --- PvP realism tweaks -----------------------------------------------------------------------------
+#
+# PvpFlee
+#   When enabled, bots try to run away when low on health while fighting a *player* (PvE panic
+#   behaviour is unchanged). This also keeps the "flee" strategy active in battlegrounds and
+#   arenas, where it is normally stripped. For open-world PvP the "flee" strategy must also be
+#   present - add it via AiPlayerbot.RandomBotCombatStrategies = "+flee".
+#   Default: 0 (disabled)
+AiPlayerbot.PvpFlee = 0
+#
+# PvpFleeHealth
+#   Health percent below which a bot panics and flees from a player target (only used when
+#   PvpFlee = 1). Independent of the regular CriticalHealth/mana panic check.
+#   Default: 20
+AiPlayerbot.PvpFleeHealth = 20
+#
+# PvpTurnSpeed
+#   Maximum turn rate, in radians per second, that a bot may rotate while facing a hostile
+#   player. This simulates a real player's turn speed so melee can get behind bots instead of
+#   them snapping around like an NPC. Only applies against player targets in PvP; PvE facing is
+#   unaffected. The player keyboard turn rate is Pi (~3.14 rad/s ~= 180 deg/s).
+#   0 = disabled (instant facing, legacy behaviour). Suggested when enabling: 3.14 - 4.5
+#   Default: 0
+AiPlayerbot.PvpTurnSpeed = 0.0
+#
+# --------------------------------------------------------------------------------------------------
+
 #
 #
 ####################################################################################################

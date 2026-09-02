@@ -6,7 +6,10 @@
 
 #include "ServerFacade.h"
 #include "Player.h"
+#include "Playerbots.h"
 #include "TargetedMovementGenerator.h"
+#include "Timer.h"
+#include <cmath>
 
 float ServerFacade::GetDistance2d(Unit* unit, WorldObject* wo)
 {
@@ -39,17 +42,40 @@ bool ServerFacade::IsDistanceGreaterOrEqualThan(float dist1, float dist2) { retu
 
 bool ServerFacade::IsDistanceLessOrEqualThan(float dist1, float dist2) { return !IsDistanceGreaterThan(dist1, dist2); }
 
-void ServerFacade::SetFacingTo(Player* bot, WorldObject* wo, bool /*force*/)
+void ServerFacade::SetFacingTo(Player* bot, WorldObject* wo, bool force)
 {
-    if (!bot)
+    if (!bot || !wo)
         return;
 
     float angle = bot->GetAngle(wo);
 
-    // if (!force && bot->isMoving())
-    //     bot->SetFacingTo(bot->GetAngle(wo));
-    // else
-    // {
+    // PvP turn-rate simulation: real players cannot pivot instantly, so when the bot is turning
+    // towards a hostile player, rotate at a capped angular speed instead of snapping. This lets
+    // melee (rogues especially) actually work an opponent's back. Disabled (instant, legacy
+    // behaviour) when PvpTurnSpeed <= 0 or when the caller forces the facing.
+    if (!force && sPlayerbotAIConfig.pvpTurnSpeed > 0.0f)
+    {
+        Unit* target = wo->ToUnit();
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+        if (botAI && target && target->IsPlayer() && bot->IsValidAttackTarget(target))
+        {
+            uint32 dtMs = botAI->lastPvpFacingMs ? GetMSTimeDiffToNow(botAI->lastPvpFacingMs) : 200;
+            botAI->lastPvpFacingMs = getMSTime();
+
+            // Clamp so a long gap between updates cannot buy a near-instant spin
+            if (dtMs > 500)
+                dtMs = 500;
+
+            float maxStep = sPlayerbotAIConfig.pvpTurnSpeed * (static_cast<float>(dtMs) / 1000.0f);
+            float diff = Position::NormalizeOrientation(angle - bot->GetOrientation());
+            if (diff > static_cast<float>(M_PI))
+                diff -= 2.0f * static_cast<float>(M_PI);
+
+            if (std::fabs(diff) > maxStep)
+                angle = Position::NormalizeOrientation(bot->GetOrientation() + (diff > 0.0f ? maxStep : -maxStep));
+        }
+    }
+
     bot->SetOrientation(angle);
 
     if (!bot->IsRooted())

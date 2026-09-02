@@ -111,7 +111,18 @@ bool HasAggroTrigger::IsActive() { return AI_VALUE2(bool, "has aggro", "current 
 
 bool PanicTrigger::IsActive()
 {
-    return AI_VALUE2(uint8, "health", "self target") < sPlayerbotAIConfig.criticalHealth &&
+    uint8 health = AI_VALUE2(uint8, "health", "self target");
+
+    // PvP: bail out on low health regardless of remaining mana/energy, but only when the
+    // current target is a player (leaves PvE panic behaviour untouched).
+    if (sPlayerbotAIConfig.pvpFlee && health < sPlayerbotAIConfig.pvpFleeHealth)
+    {
+        Unit* target = AI_VALUE(Unit*, "current target");
+        if (target && target->IsPlayer())
+            return true;
+    }
+
+    return health < sPlayerbotAIConfig.criticalHealth &&
            (!AI_VALUE2(bool, "has mana", "self target") ||
             AI_VALUE2(uint8, "mana", "self target") < sPlayerbotAIConfig.lowMana);
 }

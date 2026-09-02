@@ -488,7 +488,12 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
             engine->addStrategiesNoInit("boost", "racials", "chat", "default", "aoe", "potions", "cast time", "dps assist", nullptr);
 
         engine->removeStrategy("custom::say", false);
-        engine->removeStrategy("flee", false);
+        // Keep (and force-enable) the flee strategy in BG/arena when PvP fleeing is configured,
+        // otherwise strip it as before.
+        if (sPlayerbotAIConfig.pvpFlee)
+            engine->addStrategy("flee", false);
+        else
+            engine->removeStrategy("flee", false);
         engine->removeStrategy("threat", false);
         engine->addStrategy("boost", false);
     }
