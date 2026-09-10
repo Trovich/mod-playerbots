@@ -5,6 +5,7 @@
  */
 
 #include "PlayerbotAIConfig.h"
+#include "AccountMgr.h"
 #include "BisListMgr.h"
 #include "Config.h"
 #include "NewRpgInfo.h"
@@ -17,6 +18,7 @@
 #include "RandomPlayerbotMgr.h"
 #include "Talentspec.h"
 #include "TravelMgr.h"
+#include <algorithm>
 #include <cctype>
 #include <iostream>
 #include <sstream>
@@ -124,6 +126,8 @@ bool PlayerbotAIConfig::Initialize()
     reactDistance = sConfigMgr->GetOption<float>("AiPlayerbot.ReactDistance", 150.0f);
 
     criticalHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.CriticalHealth", 25);
+    fleeChance = sConfigMgr->GetOption<uint32>("AiPlayerbot.FleeChance", 100);
+    fastMountMinGearPct = sConfigMgr->GetOption<uint32>("AiPlayerbot.FastMountMinGearPct", 100);
     lowHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.LowHealth", 45);
     mediumHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.MediumHealth", 65);
     almostFullHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.AlmostFullHealth", 85);
@@ -482,6 +486,23 @@ bool PlayerbotAIConfig::Initialize()
     botTaxiGapMs = sConfigMgr->GetOption<uint32>("AiPlayerbot.BotTaxiGapMs", 200);
     botTaxiGapJitterMs = sConfigMgr->GetOption<uint32>("AiPlayerbot.BotTaxiGapJitterMs", 100);
 
+    // smart long-distance travel for followers
+    groupSmartTravel = sConfigMgr->GetOption<bool>("AiPlayerbot.GroupSmartTravel", true);
+    groupSmartTravelMinDist = sConfigMgr->GetOption<float>("AiPlayerbot.GroupSmartTravelMinDist", 300.0f);
+    smartTravelFreeFare = sConfigMgr->GetOption<bool>("AiPlayerbot.SmartTravelFreeFare", true);
+    smartTravelAvoidEnemies = sConfigMgr->GetOption<bool>("AiPlayerbot.SmartTravelAvoidEnemies", true);
+    smartTravelTeleportFallback = sConfigMgr->GetOption<bool>("AiPlayerbot.SmartTravelTeleportFallback", true);
+    smartTravelRunPastEnemies = sConfigMgr->GetOption<bool>("AiPlayerbot.SmartTravelRunPastEnemies", true);
+    smartTravelCombatMinHealth = sConfigMgr->GetOption<uint32>("AiPlayerbot.SmartTravelCombatMinHealth", 50);
+    smartTravelMaxWalkDist = sConfigMgr->GetOption<float>("AiPlayerbot.SmartTravelMaxWalkDist", 2000.0f);
+    smartTravelMaxTaxiHops = sConfigMgr->GetOption<uint32>("AiPlayerbot.SmartTravelMaxTaxiHops", 6);
+    smartTravelUseTransports = sConfigMgr->GetOption<bool>("AiPlayerbot.SmartTravelUseTransports", true);
+    smartTravelUseZeppelins = sConfigMgr->GetOption<bool>("AiPlayerbot.SmartTravelUseZeppelins", false);
+    smartTravelDockWaitMs = sConfigMgr->GetOption<uint32>("AiPlayerbot.SmartTravelDockWaitMs", 600000);
+    rpgFerryMaxDockDist = sConfigMgr->GetOption<float>("AiPlayerbot.RpgFerryMaxDockDist", 1500.0f);
+    lfgWalkToDungeon = sConfigMgr->GetOption<bool>("AiPlayerbot.LfgWalkToDungeon",
+        sWorld->getBoolConfig(CONFIG_LFG_SKIP_TELEPORT));
+
     LOG_INFO("server.loading", "Loading TalentSpecs...");
 
     for (uint32 cls = 1; cls < MAX_CLASSES; ++cls)
@@ -578,6 +599,37 @@ bool PlayerbotAIConfig::Initialize()
 
     randomBotAccountPrefix = sConfigMgr->GetOption<std::string>("AiPlayerbot.RandomBotAccountPrefix", "rndbot");
     randomBotAccountCount = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotAccountCount", 0);
+
+    // Accounts whose characters may never be turned into bots (random bots or any .playerbot add
+    // path). Comma-separated; each entry is either a numeric account id or an account name.
+    botExcludedAccounts.clear();
+    for (std::string token : split(sConfigMgr->GetOption<std::string>("AiPlayerbot.BotExcludedAccounts", ""), ','))
+    {
+        token.erase(0, token.find_first_not_of(" \t\r\n"));
+        token.erase(token.find_last_not_of(" \t\r\n") + 1);
+        if (token.empty())
+            continue;
+
+        uint32 accountId = 0;
+        if (token.find_first_not_of("0123456789") == std::string::npos)
+            accountId = uint32(atoi(token.c_str()));
+        else
+        {
+            std::string name = token;
+            std::transform(name.begin(), name.end(), name.begin(), ::toupper);
+            accountId = AccountMgr::GetId(name);
+        }
+
+        if (!accountId)
+        {
+            LOG_ERROR("playerbots", "AiPlayerbot.BotExcludedAccounts: unknown account '{}' - entry ignored", token);
+            continue;
+        }
+        if (std::find(botExcludedAccounts.begin(), botExcludedAccounts.end(), accountId) == botExcludedAccounts.end())
+            botExcludedAccounts.push_back(accountId);
+    }
+    if (!botExcludedAccounts.empty())
+        LOG_INFO("playerbots", "Playerbots: {} account(s) excluded from becoming bots", uint32(botExcludedAccounts.size()));
     deleteRandomBotAccounts = sConfigMgr->GetOption<bool>("AiPlayerbot.DeleteRandomBotAccounts", false);
     randomBotGuildCount = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotGuildCount", 20);
     randomBotGuildSizeMax = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotGuildSizeMax", 15);
@@ -738,6 +790,7 @@ bool PlayerbotAIConfig::Initialize()
     RpgStatusProbWeight[RPG_TRAVEL_FLIGHT] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.TravelFlight", 15);
     RpgStatusProbWeight[RPG_REST] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.Rest", 5);
     RpgStatusProbWeight[RPG_OUTDOOR_PVP] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.OutdoorPvp", 10);
+    RpgStatusProbWeight[RPG_TRAVEL_FERRY] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.TravelFerry", 8);
 
     syncLevelWithPlayers = sConfigMgr->GetOption<bool>("AiPlayerbot.SyncLevelWithPlayers", false);
     randomBotGroupNearby = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotGroupNearby", false);
@@ -945,6 +998,14 @@ void PlayerbotAIConfig::LoadRandomBotLevelConfig()
 bool PlayerbotAIConfig::IsInRandomAccountList(uint32 id)
 {
     return find(randomBotAccounts.begin(), randomBotAccounts.end(), id) != randomBotAccounts.end();
+}
+
+bool PlayerbotAIConfig::IsBotExcludedAccount(uint32 accountId)
+{
+    if (!accountId || botExcludedAccounts.empty())
+        return false;
+
+    return find(botExcludedAccounts.begin(), botExcludedAccounts.end(), accountId) != botExcludedAccounts.end();
 }
 
 bool PlayerbotAIConfig::IsInRandomQuestItemList(uint32 id)

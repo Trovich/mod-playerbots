@@ -68,6 +68,14 @@ void NewRpgStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
     );
     triggers.push_back(
         new TriggerNode(
+            "travel ferry status",
+            {
+                NextAction("new rpg travel ferry", 3.0f)
+            }
+        )
+    );
+    triggers.push_back(
+        new TriggerNode(
             "outdoor pvp status",
             {
                 NextAction("new rpg outdoor pvp", 3.0f)

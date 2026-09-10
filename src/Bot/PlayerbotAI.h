@@ -544,6 +544,9 @@ public:
     // Checks if the bot is summoned an altbot of a player
     bool IsAltBot();
     bool HasGameClientMaster();
+    // True if this bot shares a group with a human (real player or self-bot), even when no
+    // master is set yet. Used to give grouped bots full activity / fast reactions.
+    bool HasRealPlayerInGroup();
     Player* GetGroupLeader();
     uint32 GetFixedBotNumber(uint32 maxNum = 100);
     GrouperType GetGrouperType();
@@ -654,6 +657,12 @@ protected:
     Position jumpDestination = Position();
     uint32 nextTransportCheck = 0;
     bool spellInterruptRequested = false;
+    // Cached HasRealPlayerInGroup() result; that walk is too costly for the per-tick
+    // GetReactDelay() path to redo every time (see PlayerbotAI.cpp).
+    bool realPlayerInGroupCached = false;
+    uint32 realPlayerInGroupCheckedMs = 0;
+
+public:
     // Timestamp (getMSTime) of the last PvP facing update, used to cap bot turn rate against players
     uint32 lastPvpFacingMs = 0;
 };

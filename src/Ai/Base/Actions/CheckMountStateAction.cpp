@@ -11,6 +11,7 @@
 #include "BattlegroundWS.h"
 #include "DBCStores.h"
 #include "Event.h"
+#include "LootObjectStack.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
@@ -101,6 +102,13 @@ bool CheckMountStateAction::Execute(Event /*event*/)
         shouldMount = true;
     }
 
+    // Standing on a gathering node: stay dismounted until it is exhausted.
+    // OpenLootAction clears the loot target after every single gather, so with
+    // multi-gather veins the bot would otherwise mount up in the gap and
+    // dismount again for the next swing, over and over.
+    if (shouldMount && HasGatherableNodeInReach())
+        shouldMount = false;
+
     // If should dismount, or master (if any) is no longer in travel form, yet bot still is, remove the shapeshifts
     if (shouldDismount ||
         (masterInShapeshiftForm != FORM_TRAVEL && botInShapeshiftForm == FORM_TRAVEL) ||
@@ -117,8 +125,10 @@ bool CheckMountStateAction::Execute(Event /*event*/)
     bool inBattleground = bot->InBattleground();
     bool const noRealMaster = (!master || master == bot);
 
-    // If there is a master and bot not in BG, follow master's mount state regardless of group leader
-    if (!noRealMaster && !inBattleground)
+    // If there is a nearby master and bot not in BG, follow master's mount state regardless of
+    // group leader. A separated bot (different map / far away, e.g. travelling to catch up)
+    // decides for itself instead.
+    if (!noRealMaster && !inBattleground && !separatedFromMaster)
     {
         if (ShouldFollowMasterMountState(master, noAttackers, shouldMount))
             return Mount();
@@ -132,8 +142,8 @@ bool CheckMountStateAction::Execute(Event /*event*/)
         return false;
     }
 
-    // No real master (random bot or self-bot) OR bot in BG
-    if ((noRealMaster || inBattleground) && !bot->IsMounted() &&
+    // No nearby master (random bot, self-bot, or separated follower) OR bot in BG
+    if ((noRealMaster || inBattleground || separatedFromMaster) && !bot->IsMounted() &&
         noAttackers && shouldMount && !bot->IsInCombat())
         return Mount();
 
@@ -155,6 +165,10 @@ bool CheckMountStateAction::isUseful()
         return false;
 
     master = GetMaster();
+
+    separatedFromMaster = master && master != bot &&
+        (master->GetMapId() != bot->GetMapId() ||
+         bot->GetExactDist2d(master->GetPositionX(), master->GetPositionY()) > sPlayerbotAIConfig.sightDistance);
 
     // Get shapeshift states, only applicable when there's a master
     if (master)
@@ -252,6 +266,28 @@ void CheckMountStateAction::Dismount()
     bot->GetSession()->HandleCancelMountAuraOpcode(emptyPacket);
 
     ClearStaleFlightFlags();
+}
+
+bool CheckMountStateAction::HasGatherableNodeInReach()
+{
+    GuidVector gos = context->GetValue<GuidVector>("nearest game objects")->Get();
+    for (ObjectGuid const& guid : gos)
+    {
+        // Cheap checks first: this runs on every mount check, for every bot.
+        GameObject* go = botAI->GetGameObject(guid);
+        if (!go || go->GetGoType() != GAMEOBJECT_TYPE_CHEST || !go->isSpawned())
+            continue;
+
+        if (bot->GetDistance(go) > INTERACTION_DISTANCE)
+            continue;
+
+        // Only now pay for the loot lookup - normally zero or one node gets here.
+        LootObject loot(bot, guid);
+        if (loot.IsLootPossible(bot))
+            return true;
+    }
+
+    return false;
 }
 
 void CheckMountStateAction::ClearStaleFlightFlags()
@@ -524,7 +560,7 @@ int32 CheckMountStateAction::CalculateMasterMountSpeed(Player* master) const
     // check if bot has master and if master is self
     bool const noRealMaster = (!master || master == bot);
 
-    if (!noRealMaster && !bot->InBattleground())
+    if (!noRealMaster && !separatedFromMaster && !bot->InBattleground())
     {
         auto auraEffects = master->GetAuraEffectsByType(SPELL_AURA_MOUNTED);
         if (!auraEffects.empty())
@@ -546,6 +582,16 @@ int32 CheckMountStateAction::CalculateMasterMountSpeed(Player* master) const
         return (ridingSkill >= 300) ? 279 : 149;
 
     int32 maxGround = (ridingSkill >= 150) ? 99 : 59;
+
+    // Tie the fast ground mount to gear: a bot poorly equipped for its level rides slow.
+    if (maxGround > 59 && sPlayerbotAIConfig.fastMountMinGearPct)
+    {
+        uint32 const avgIlvl = botAI->GetEquipGearScore(bot);
+        uint32 const level = std::max<uint32>(bot->GetLevel(), 1);
+        if (avgIlvl * 100 < level * sPlayerbotAIConfig.fastMountMinGearPct)
+            maxGround = 59;
+    }
+
     if (bot->InBattleground() && maxGround > 99)
         maxGround = 99;
     return maxGround;
@@ -555,7 +601,7 @@ uint32 CheckMountStateAction::GetMountType(Player* master) const
 {
     bool const noRealMaster = (!master || master == bot);
 
-    if (noRealMaster)
+    if (noRealMaster || separatedFromMaster)
         return (!bot->InBattleground() && BotCanUseFlyingMount(bot)) ? 1 : 0;
 
     auto auraEffects = master->GetAuraEffectsByType(SPELL_AURA_MOUNTED);

@@ -15,6 +15,32 @@ constexpr uint32 SPELL_DIVINE_SHIELD = 642;
 constexpr uint32 SPELL_ICE_BLOCK = 45438;
 constexpr uint32 SPELL_BLESSING_OF_PROTECTION = 41450;
 constexpr uint32 SPELL_COMMANDING_PRESENCE_RANKS[] = { 12318, 12857, 12858, 12860, 12861 };
+
+// Mirrors the server-side check in spell_warr_rend::CheckAreaTarget (Elemental,
+// Mechanical and Undead are immune to Bleed) - without this, the bot would keep
+// re-triggering "rend" every check interval against a target it can never land
+// the debuff on, crowding out the rest of its rotation.
+bool IsBleedImmune(Unit* target)
+{
+    return target && (target->GetCreatureTypeMask() &
+        (CREATURE_TYPEMASK_MECHANICAL_OR_ELEMENTAL | (1 << (CREATURE_TYPE_UNDEAD - 1))));
+}
+}
+
+bool RendDebuffTrigger::IsActive()
+{
+    if (IsBleedImmune(GetTarget()))
+        return false;
+
+    return DebuffTrigger::IsActive();
+}
+
+bool RendDebuffOnAttackerTrigger::IsActive()
+{
+    if (IsBleedImmune(GetTarget()))
+        return false;
+
+    return DebuffOnMeleeAttackerTrigger::IsActive();
 }
 
 bool BloodrageBuffTrigger::IsActive()

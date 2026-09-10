@@ -9,9 +9,11 @@
 
 #include "CureTriggers.h"
 #include "FishingTriggers.h"
+#include "FollowTravelAction.h"
 #include "GenericTriggers.h"
 #include "GuildTriggers.h"
 #include "HealthTriggers.h"
+#include "LfgTravelToDungeonAction.h"
 #include "LfgTriggers.h"
 #include "LootTriggers.h"
 #include "NamedObjectContext.h"
@@ -152,6 +154,8 @@ public:
         creators["not behind target"] = &TriggerContext::not_behind_target;
         creators["not facing target"] = &TriggerContext::not_facing_target;
         creators["far from master"] = &TriggerContext::far_from_master;
+        creators["follow travel needed"] = &TriggerContext::follow_travel_needed;
+        creators["lfg travel to dungeon needed"] = &TriggerContext::lfg_travel_to_dungeon_needed;
         creators["far from loot target"] = &TriggerContext::far_from_loot_target;
         creators["can loot"] = &TriggerContext::can_loot;
         creators["swimming"] = &TriggerContext::swimming;
@@ -243,6 +247,7 @@ public:
         creators["wander npc status"] = &TriggerContext::wander_npc_status;
         creators["do quest status"] = &TriggerContext::do_quest_status;
         creators["travel flight status"] = &TriggerContext::travel_flight_status;
+        creators["travel ferry status"] = &TriggerContext::travel_ferry_status;
         creators["outdoor pvp status"] = &TriggerContext::outdoor_pvp_status;
         creators["can self resurrect"] = &TriggerContext::can_self_resurrect;
         creators["can fish"] = &TriggerContext::can_fish;
@@ -299,6 +304,8 @@ private:
     static Trigger* can_loot(PlayerbotAI* botAI) { return new CanLootTrigger(botAI); }
     static Trigger* far_from_loot_target(PlayerbotAI* botAI) { return new FarFromCurrentLootTrigger(botAI); }
     static Trigger* far_from_master(PlayerbotAI* botAI) { return new FarFromMasterTrigger(botAI); }
+    static Trigger* follow_travel_needed(PlayerbotAI* botAI) { return new FollowTravelTrigger(botAI); }
+    static Trigger* lfg_travel_to_dungeon_needed(PlayerbotAI* botAI) { return new LfgTravelToDungeonTrigger(botAI); }
     static Trigger* behind_target(PlayerbotAI* botAI) { return new IsBehindTargetTrigger(botAI); }
     static Trigger* not_behind_target(PlayerbotAI* botAI) { return new IsNotBehindTargetTrigger(botAI); }
     static Trigger* not_facing_target(PlayerbotAI* botAI) { return new IsNotFacingTargetTrigger(botAI); }
@@ -458,6 +465,7 @@ private:
     static Trigger* wander_npc_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_WANDER_NPC); }
     static Trigger* do_quest_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_DO_QUEST); }
     static Trigger* travel_flight_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_TRAVEL_FLIGHT); }
+    static Trigger* travel_ferry_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_TRAVEL_FERRY); }
     static Trigger* outdoor_pvp_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_OUTDOOR_PVP); }
     static Trigger* can_self_resurrect(PlayerbotAI* ai) { return new SelfResurrectTrigger(ai); }
     static Trigger* can_fish(PlayerbotAI* ai) { return new CanFishTrigger(ai); }

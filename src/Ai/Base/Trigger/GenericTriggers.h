@@ -544,10 +544,15 @@ private:
 
 BEGIN_TRIGGER(PanicTrigger, Trigger) // cppcheck-suppress unknownMacro
 std::string const getName() override { return "panic"; }
+// Per-combat sticky flee roll (AiPlayerbot.FleeChance): 0 = undecided, 1 = flee, 2 = hold.
+int8 fleeDecision = 0;
+uint32 fleeEvalMs = 0;
 END_TRIGGER()
 
 BEGIN_TRIGGER(OutNumberedTrigger, Trigger)
 std::string const getName() override { return "outnumbered"; }
+int8 fleeDecision = 0;
+uint32 fleeEvalMs = 0;
 END_TRIGGER()
 
 class NoPetTrigger : public Trigger

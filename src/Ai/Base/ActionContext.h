@@ -29,6 +29,7 @@
 #include "EmoteAction.h"
 #include "FishingAction.h"
 #include "FollowActions.h"
+#include "FollowTravelAction.h"
 #include "GenericActions.h"
 #include "GenericSpellActions.h"
 #include "GiveItemAction.h"
@@ -39,6 +40,7 @@
 #include "ImbueAction.h"
 #include "InviteToGroupAction.h"
 #include "LeaveGroupAction.h"
+#include "LfgTravelToDungeonAction.h"
 #include "LootAction.h"
 #include "LootRollAction.h"
 #include "MoveToRpgTargetAction.h"
@@ -131,6 +133,8 @@ public:
         creators["release loot"] = &ActionContext::release_loot;
         creators["shoot"] = &ActionContext::shoot;
         creators["follow"] = &ActionContext::follow;
+        creators["follow travel"] = &ActionContext::follow_travel;
+        creators["lfg travel to dungeon"] = &ActionContext::lfg_travel_to_dungeon;
         creators["move from group"] = &ActionContext::move_from_group;
         creators["flee to group leader"] = &ActionContext::flee_to_group_leader;
         creators["runaway"] = &ActionContext::runaway;
@@ -277,6 +281,7 @@ public:
         creators["new rpg wander npc"] = &ActionContext::new_rpg_wander_npc;
         creators["new rpg do quest"] = &ActionContext::new_rpg_do_quest;
         creators["new rpg travel flight"] = &ActionContext::new_rpg_travel_flight;
+        creators["new rpg travel ferry"] = &ActionContext::new_rpg_travel_ferry;
         creators["new rpg outdoor pvp"] = &ActionContext::new_rpg_outdoor_pvp;
         creators["wait for attack keep safe distance"] = &ActionContext::wait_for_attack_keep_safe_distance;
     }
@@ -348,6 +353,8 @@ private:
     static Action* sit(PlayerbotAI* botAI) { return new SitAction(botAI); }
     static Action* runaway(PlayerbotAI* botAI) { return new RunAwayAction(botAI); }
     static Action* follow(PlayerbotAI* botAI) { return new FollowAction(botAI); }
+    static Action* follow_travel(PlayerbotAI* botAI) { return new FollowTravelAction(botAI); }
+    static Action* lfg_travel_to_dungeon(PlayerbotAI* botAI) { return new LfgTravelToDungeonAction(botAI); }
     static Action* move_from_group(PlayerbotAI* botAI) { return new MoveFromGroupAction(botAI); }
     static Action* flee_to_group_leader(PlayerbotAI* botAI) { return new FleeToGroupLeaderAction(botAI); }
     static Action* add_gathering_loot(PlayerbotAI* botAI) { return new AddGatheringLootAction(botAI); }
@@ -484,6 +491,7 @@ private:
     static Action* new_rpg_wander_npc(PlayerbotAI* ai) { return new NewRpgWanderNpcAction(ai); }
     static Action* new_rpg_do_quest(PlayerbotAI* ai) { return new NewRpgDoQuestAction(ai); }
     static Action* new_rpg_travel_flight(PlayerbotAI* ai) { return new NewRpgTravelFlightAction(ai); }
+    static Action* new_rpg_travel_ferry(PlayerbotAI* ai) { return new NewRpgTravelFerryAction(ai); }
     static Action* new_rpg_outdoor_pvp(PlayerbotAI* ai) { return new NewRpgOutdoorPvpAction(ai); }
     static Action* wait_for_attack_keep_safe_distance(PlayerbotAI* ai) { return new WaitForAttackKeepSafeDistanceAction(ai); }
 };

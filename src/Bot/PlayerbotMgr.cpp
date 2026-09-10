@@ -97,6 +97,19 @@ void PlayerbotHolder::AddPlayerBot(ObjectGuid playerGuid, uint32 masterAccountId
     WorldSession* masterSession = masterAccountId ? sWorldSessionMgr->FindSession(masterAccountId) : nullptr;
     Player* masterPlayer = masterSession ? masterSession->GetPlayer() : nullptr;
 
+    // Config kill switch: characters on excluded accounts can never be controlled as bots.
+    if (sPlayerbotAIConfig.IsBotExcludedAccount(accountId))
+    {
+        if (masterSession)
+        {
+            std::string excludedName;
+            sCharacterCache->GetCharacterNameByGuid(playerGuid, excludedName);
+            ChatHandler(masterSession).PSendSysMessage(
+                "Failure: {} is on an account that is not allowed to use bots.", excludedName.c_str());
+        }
+        return;
+    }
+
     bool isRndbot = !masterAccountId;
     bool sameAccount = sPlayerbotAIConfig.allowAccountBots && accountId == masterAccountId;
     Guild* guild = masterPlayer ? sGuildMgr->GetGuildById(masterPlayer->GetGuildId()) : nullptr;

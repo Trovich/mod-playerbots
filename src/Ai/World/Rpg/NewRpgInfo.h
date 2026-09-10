@@ -60,6 +60,15 @@ struct NewRpgInfo
         std::vector<uint32> path;
         bool inFlight{false};
     };
+    // RPG_TRAVEL_FERRY
+    struct TravelFerry
+    {
+        uint32 transportEntry{0};
+        WorldPosition dockPos{};   // where it docks on our map (board here)
+        WorldPosition landPos{};   // where it docks on the far map (get off here)
+        uint32 waitSinceMs{0};     // when we reached the pier / boarded; 0 = still walking
+        bool aboard{false};
+    };
     // RPG_REST
     struct Rest
     {
@@ -92,6 +101,7 @@ struct NewRpgInfo
         DoQuest,
         Rest,
         TravelFlight,
+        TravelFerry,
         OutdoorPvP
     >;
     RpgData data;
@@ -105,6 +115,7 @@ struct NewRpgInfo
     void ChangeToWanderRandom();
     void ChangeToDoQuest(uint32 questId, const Quest* quest);
     void ChangeToTravelFlight(uint32 flightMasterEntry, WorldPosition flightMasterPos, std::vector<uint32> path);
+    void ChangeToTravelFerry(uint32 transportEntry, WorldPosition dockPos, WorldPosition landPos);
     void ChangeToOutdoorPvp(ObjectGuid::LowType capturePointSpawnId = 0);
     void ChangeToRest();
     void ChangeToIdle();

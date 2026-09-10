@@ -109,6 +109,21 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
             bot->GetName(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId(),
             dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), dest.GetMapId(), bot->GetZoneId(),
             zone_name);
+        // Before the blunt teleport-to-destination: if a portal on this map leads closer to
+        // dest, step through that instead. It lands the bot somewhere it could legitimately
+        // have walked to, and it is what frees a bot from a portal-only pocket such as
+        // Darnassus - whose flight master and boat dock both sit on the far side of the
+        // Rut'theran portal, so nothing it wants is reachable on foot.
+        TravelMgr::PortalHop hop;
+        if (sTravelMgr.FindPortalHop(bot, dest, hop, false))
+        {
+            LOG_DEBUG("playerbots", "[New RPG] {} takes the portal on map {} toward its goal instead of teleporting",
+                      bot->GetName(), hop.staging.GetMapId());
+            bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
+            return bot->TeleportTo(hop.destMap, hop.destPos.GetPositionX(), hop.destPos.GetPositionY(),
+                                   hop.destPos.GetPositionZ(), hop.destPos.GetOrientation());
+        }
+
         bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
         return bot->TeleportTo(dest);
     }
@@ -1179,6 +1194,19 @@ bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateSta
             }
             return false;
         }
+        case RPG_TRAVEL_FERRY:
+        {
+            if (!sPlayerbotAIConfig.smartTravelUseTransports)
+                return false;
+
+            TravelMgr::TransportLeg leg;
+            if (sTravelMgr.SelectRandomFerryLeg(bot, sPlayerbotAIConfig.rpgFerryMaxDockDist, leg))
+            {
+                botAI->rpgInfo.ChangeToTravelFerry(leg.entry, leg.board.pos, leg.land.pos);
+                return true;
+            }
+            return false;
+        }
         case RPG_IDLE:
         {
             botAI->rpgInfo.ChangeToIdle();
@@ -1255,6 +1283,14 @@ bool NewRpgBaseAction::CheckRpgStatusAvailable(NewRpgStatus status)
             WorldPosition flightMasterPos;
             std::vector<uint32> path;
             return SelectRandomFlightTaxiNode(flightMasterEntry, flightMasterPos, path);
+        }
+        case RPG_TRAVEL_FERRY:
+        {
+            if (!sPlayerbotAIConfig.smartTravelUseTransports)
+                return false;
+
+            TravelMgr::TransportLeg leg;
+            return sTravelMgr.SelectRandomFerryLeg(bot, sPlayerbotAIConfig.rpgFerryMaxDockDist, leg);
         }
         case RPG_OUTDOOR_PVP:
         {

@@ -6,6 +6,7 @@
 #include "FollowActions.h"
 #include "Event.h"
 #include "Formations.h"
+#include "FollowTravelStateValue.h"
 #include "LastMovementValue.h"
 #include "Map.h"
 #include "MotionMaster.h"
@@ -243,6 +244,11 @@ bool FollowAction::isUseful()
     // (without removing/adding follow)
     if (botAI->HasStrategy("move from group", BOT_STATE_COMBAT) ||
         botAI->HasStrategy("move from group", BOT_STATE_NON_COMBAT))
+        return false;
+
+    // Smart long-distance travel (flight masters / portal hubs) owns movement while a trip
+    // is in progress; plain follow resumes once it clears the state.
+    if (AI_VALUE(FollowTravelState&, "follow travel state").phase != FollowTravelPhase::None)
         return false;
 
     if (bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL) != nullptr)

@@ -91,3 +91,16 @@ std::vector<NextAction> CombatFormationStrategy::getDefaultActions()
         NextAction("combat formation move", ACTION_NORMAL)
     };
 }
+
+void CombatFormationStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+{
+    // Combat-engine home for the smart-travel triggers: keep a bot that is mid-trip moving
+    // toward its goal through trash it aggroed on the way (the trash leashes once outrun)
+    // instead of stopping to fight. This strategy is added exactly once per combat engine
+    // (AiFactory::AddDefaultCombatStrategies), unlike CombatStrategy::InitTriggers which every
+    // class strategy chains into - registering there would evaluate these triggers 2-4x a tick.
+    triggers.push_back(
+        new TriggerNode("follow travel needed", { NextAction("follow travel", ACTION_MOVE) }));
+    triggers.push_back(
+        new TriggerNode("lfg travel to dungeon needed", { NextAction("lfg travel to dungeon", ACTION_MOVE) }));
+}

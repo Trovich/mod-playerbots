@@ -31,6 +31,7 @@ class RendDebuffOnAttackerTrigger : public DebuffOnMeleeAttackerTrigger
 {
 public:
     RendDebuffOnAttackerTrigger(PlayerbotAI* botAI) : DebuffOnMeleeAttackerTrigger(botAI, "rend") {}
+    bool IsActive() override;
 };
 
 CAN_CAST_TRIGGER(RevengeAvailableTrigger, "revenge");
@@ -69,6 +70,7 @@ class RendDebuffTrigger : public DebuffTrigger
 {
 public:
     RendDebuffTrigger(PlayerbotAI* botAI) : DebuffTrigger(botAI, "rend", 1, true) {}
+    bool IsActive() override;
 };
 
 class VigilanceTrigger : public BuffOnPartyTrigger

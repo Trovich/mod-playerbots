@@ -14,6 +14,9 @@ void LfgStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
         new TriggerNode("seldom", { NextAction("lfg leave", relevance) }));
     triggers.push_back(new TriggerNode(
         "unknown dungeon", { NextAction("give leader in dungeon", relevance) }));
+    // With DungeonFinder.SkipTeleport, walk to the dungeon entrance instead of being ported in.
+    triggers.push_back(new TriggerNode(
+        "lfg travel to dungeon needed", { NextAction("lfg travel to dungeon", 2.0f) }));
 }
 
 LfgStrategy::LfgStrategy(PlayerbotAI* botAI) : PassThroughStrategy(botAI) {}

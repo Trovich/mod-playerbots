@@ -44,6 +44,7 @@
 #include "ItemCountValue.h"
 #include "ItemForSpellValue.h"
 #include "ItemUsageValue.h"
+#include "FollowTravelStateValue.h"
 #include "LastMovementValue.h"
 #include "LastSaidValue.h"
 #include "LastSpellCastTimeValue.h"
@@ -180,6 +181,7 @@ public:
         creators["always loot list"] = &ValueContext::always_loot_list;
         creators["loot strategy"] = &ValueContext::loot_strategy;
         creators["last movement"] = &ValueContext::last_movement;
+        creators["follow travel state"] = &ValueContext::follow_travel_state;
         creators["stay time"] = &ValueContext::stay_time;
         creators["last taxi"] = &ValueContext::last_movement;
         creators["last area trigger"] = &ValueContext::last_movement;
@@ -390,6 +392,7 @@ private:
     static UntypedValue* swimming(PlayerbotAI* botAI) { return new IsSwimmingValue(botAI); }
     static UntypedValue* distance(PlayerbotAI* botAI) { return new DistanceValue(botAI); }
     static UntypedValue* last_movement(PlayerbotAI* botAI) { return new LastMovementValue(botAI); }
+    static UntypedValue* follow_travel_state(PlayerbotAI* botAI) { return new FollowTravelStateValue(botAI); }
     static UntypedValue* stay_time(PlayerbotAI* botAI) { return new StayTimeValue(botAI); }
 
     static UntypedValue* can_loot(PlayerbotAI* botAI) { return new CanLootValue(botAI); }

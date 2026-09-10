@@ -4325,6 +4325,39 @@ bool PlayerbotAI::IsInterruptableSpellCasting(Unit* target, std::string const sp
     return false;
 }
 
+// Hard crowd control - the only thing worth spending a global cooldown on
+// dispelling while fighting another player. Damage over time, procs, judgement
+// chip and the like are deliberately not here. Snares (MOD_DECREASE_SPEED) are
+// left out too: they are common enough in melee that including them would put
+// the bot right back to dispelling on cooldown.
+static bool IsCrowdControlAura(SpellInfo const* spellInfo)
+{
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        if (!spellInfo->Effects[i].IsAura())
+            continue;
+
+        switch (spellInfo->Effects[i].ApplyAuraName)
+        {
+            case SPELL_AURA_MOD_STUN:
+            case SPELL_AURA_MOD_FEAR:
+            case SPELL_AURA_MOD_CONFUSE:
+            case SPELL_AURA_MOD_ROOT:
+            case SPELL_AURA_MOD_SILENCE:
+            case SPELL_AURA_MOD_PACIFY:
+            case SPELL_AURA_MOD_PACIFY_SILENCE:
+            case SPELL_AURA_MOD_CHARM:
+            case SPELL_AURA_MOD_POSSESS:
+            case SPELL_AURA_TRANSFORM:
+                return true;
+            default:
+                break;
+        }
+    }
+
+    return false;
+}
+
 bool PlayerbotAI::HasAuraToDispel(Unit* target, uint32 dispelType)
 {
     if (!IsValidUnit(target) || !target->IsAlive())
@@ -4334,6 +4367,13 @@ bool PlayerbotAI::HasAuraToDispel(Unit* target, uint32 dispelType)
         return false;
 
     bool isFriend = bot->IsFriendlyTo(target);
+
+    // Fighting an actual player: only bother clearing hard crowd control off
+    // ourselves or an ally. Offensive dispels on enemies (purge and friends)
+    // and all of PvE keep stock behaviour. "enemy player target" comes from the
+    // bot's own PvP combat references, so it covers world PvP, BGs and arenas,
+    // and it is cached for a second.
+    bool const ccOnly = isFriend && GetAiObjectContext()->GetValue<Unit*>("enemy player target")->Get();
 
     Unit::VisibleAuraMap const* visibleAuras = target->GetVisibleAuras();
     if (!visibleAuras)
@@ -4363,8 +4403,13 @@ bool PlayerbotAI::HasAuraToDispel(Unit* target, uint32 dispelType)
         if (!isPositiveSpell && !isFriend)
             continue;
 
-        if (canDispel(spellInfo, dispelType))
-            return true;
+        if (!canDispel(spellInfo, dispelType))
+            continue;
+
+        if (ccOnly && !IsCrowdControlAura(spellInfo))
+            continue;
+
+        return true;
     }
 
     return false;
@@ -4478,6 +4523,37 @@ bool PlayerbotAI::IsAltBot() { return HasGameClientMaster() && !sRandomPlayerbot
 
 // True when the bot's master is driven by a player with a game client: a regular player (no bot AI) or a selfbot player.
 bool PlayerbotAI::HasGameClientMaster() { return IsRealPlayer(master) || IsSelfBot(master); }
+
+bool PlayerbotAI::HasRealPlayerInGroup()
+{
+    if (HasGameClientMaster())
+        return true;
+
+    // Walking the group costs a map lookup + dynamic_cast per member and this is queried from
+    // the per-tick GetReactDelay() path; membership changes rarely, so cache it for a second.
+    uint32 const now = getMSTime();
+    if (realPlayerInGroupCheckedMs && now - realPlayerInGroupCheckedMs < 1000)
+        return realPlayerInGroupCached;
+
+    realPlayerInGroupCheckedMs = now;
+    realPlayerInGroupCached = false;
+
+    Group* group = bot->GetGroup();
+    if (!group)
+        return false;
+
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->GetSource();
+        if (member && member != bot && (IsRealPlayer(member) || IsSelfBot(member)))
+        {
+            realPlayerInGroupCached = true;
+            break;
+        }
+    }
+
+    return realPlayerInGroupCached;
+}
 
 Player* PlayerbotAI::GetGroupLeader()
 {
@@ -4696,17 +4772,19 @@ bool PlayerbotAI::AllowActive(ActivityType activityType)
         for (GroupReference* gref = group->GetFirstMember(); gref; gref = gref->next())
         {
             Player* member = gref->GetSource();
-            if (!member || !member->IsInWorld() || member->GetMapId() != bot->GetMapId())
-                continue;
-
-            if (member == bot)
+            if (!member || !member->IsInWorld() || member == bot)
                 continue;
 
             PlayerbotAI* memberBotAI = GET_PLAYERBOT_AI(member);
 
-            // group member is a real player or owned by one — stay active
+            // group member is a real player or owned by one — stay fully active regardless of
+            // distance, so the bot can travel a long way to rejoin the group
             if (!memberBotAI || memberBotAI->HasGameClientMaster())
                 return true;
+
+            // remaining checks only make sense for members on the same map
+            if (member->GetMapId() != bot->GetMapId())
+                continue;
 
             // if group leader (bot) is inactive, follow suit
             if (group->IsLeader(member->GetGUID()))
@@ -6611,6 +6689,11 @@ std::set<uint32> PlayerbotAI::GetCurrentIncompleteQuestIds()
 uint32 PlayerbotAI::GetReactDelay()
 {
     uint32 base = sPlayerbotAIConfig.reactDelay;  // Default 100(ms)
+
+    // Bots grouped with a real player always react at full speed (only 3-4 of them, cost is
+    // negligible), even before their master pointer has been reconciled.
+    if (HasRealPlayerInGroup())
+        return base;
 
     // If dynamic react delay is disabled, use a static calculation
     if (!sPlayerbotAIConfig.dynamicReactDelay)

@@ -5,11 +5,13 @@
  */
 
 #include "NewRpgAction.h"
+#include "Transport.h"
 #include "AreaDefines.h"
 #include "BroadcastHelper.h"
 #include "ChatHelper.h"
 #include "GossipDef.h"
 #include "IVMapMgr.h"
+#include "Map.h"
 #include "NewRpgInfo.h"
 #include "NewRpgStrategy.h"
 #include "Object.h"
@@ -20,13 +22,16 @@
 #include "PathGenerator.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
+#include "PlayerbotAIConfig.h"
 #include "PlayerbotTextMgr.h"
+#include "Playerbots.h"
 #include "QuestDef.h"
 #include "Random.h"
 #include "SharedDefines.h"
 #include "Timer.h"
 #include "TravelMgr.h"
 #include "G3D/Vector2.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 
@@ -154,6 +159,20 @@ bool TellRpgStatusAction::Execute(Event event)
         WhisperStatusChange(owner, "TRAVEL_FLIGHT");
         return true;
     }
+    else if (status == RPG_TRAVEL_FERRY)
+    {
+        TravelMgr::TransportLeg leg;
+        if (!sTravelMgr.SelectRandomFerryLeg(bot, sPlayerbotAIConfig.rpgFerryMaxDockDist, leg))
+        {
+            std::string msg = PlayerbotTextMgr::instance().GetBotTextOrDefault(
+                "rpg_no_ferry_error", "No ferry available.", {});
+            bot->Whisper(msg, LANG_UNIVERSAL, owner);
+            return false;
+        }
+        info.ChangeToTravelFerry(leg.entry, leg.board.pos, leg.land.pos);
+        WhisperStatusChange(owner, "TRAVEL_FERRY");
+        return true;
+    }
     else if (status == RPG_OUTDOOR_PVP)
     {
         info.ChangeToOutdoorPvp();
@@ -235,7 +254,7 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
     {
         case RPG_IDLE:
             return RandomChangeStatus({RPG_GO_CAMP, RPG_GO_GRIND, RPG_WANDER_RANDOM, RPG_WANDER_NPC, RPG_DO_QUEST,
-                                       RPG_TRAVEL_FLIGHT, RPG_REST, RPG_OUTDOOR_PVP});
+                                       RPG_TRAVEL_FLIGHT, RPG_TRAVEL_FERRY, RPG_REST, RPG_OUTDOOR_PVP});
 
         case RPG_GO_GRIND:
         {
@@ -292,6 +311,9 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
             }
             break;
         }
+        case RPG_TRAVEL_FERRY:
+            // Driven entirely by NewRpgTravelFerryAction, which switches back to IDLE itself.
+            break;
         case RPG_TRAVEL_FLIGHT:
         {
             auto& data = std::get<NewRpgInfo::TravelFlight>(info.data);
@@ -626,6 +648,153 @@ bool NewRpgDoQuestAction::DoCompletedQuest(NewRpgInfo::DoQuest& data)
         return true;
     }
     return false;
+}
+
+namespace
+{
+    // Same tolerant deck probe FollowTravelAction uses: GetTransportForPos raycasts from a
+    // fixed height and is fussy about the exact Z.
+    Transport* FerryUnderfoot(Player* bot, float x, float y, float z)
+    {
+        Map* map = bot->GetMap();
+        if (!map)
+            return nullptr;
+
+        for (float const pz : { z, z + 0.5f, z + 1.5f, z - 0.5f })
+            if (Transport* t = map->GetTransportForPos(bot->GetPhaseMask(), x, y, pz, bot))
+                return t;
+
+        return nullptr;
+    }
+
+    Transport* FindFerry(Player* bot, uint32 entry)
+    {
+        Map* map = bot->GetMap();
+        if (!map || !entry)
+            return nullptr;
+
+        for (Transport* t : map->GetAllTransports())
+            if (t && t->GetEntry() == entry)
+                return t;
+
+        return nullptr;
+    }
+
+    constexpr float FERRY_DOCK_ARRIVE_DIS = 25.0f;
+    constexpr float FERRY_BOARD_DIS = 80.0f;   // bot-to-hull distance that counts as "berthed here"
+    constexpr float FERRY_LEAVE_DIS = 120.0f;  // bot-to-dock distance that counts as "we have arrived"
+}
+
+bool NewRpgTravelFerryAction::Execute(Event /*event*/)
+{
+    NewRpgInfo& info = botAI->rpgInfo;
+    auto* dataPtr = std::get_if<NewRpgInfo::TravelFerry>(&info.data);
+    if (!dataPtr)
+        return false;
+
+    auto& data = *dataPtr;
+    uint32 const now = getMSTime();
+
+    // --- riding ---
+    if (Transport* current = bot->GetTransport())
+    {
+        data.aboard = true;
+
+        // Give up rather than circle forever if the far dock never matches.
+        if (data.waitSinceMs && GetMSTimeDiffToNow(data.waitSinceMs) > sPlayerbotAIConfig.smartTravelDockWaitMs)
+        {
+            current->RemovePassenger(bot);
+            info.ChangeToIdle();
+            return true;
+        }
+
+        // Berthed on the far side: step ashore. Measured from the bot, which rides with the
+        // hull - the transport's own origin is offset from the route's stop node.
+        if (bot->GetMapId() == data.landPos.GetMapId() && TravelMgr::IsTransportParked(current) &&
+            bot->GetExactDist2d(data.landPos.GetPositionX(), data.landPos.GetPositionY()) < FERRY_LEAVE_DIS)
+        {
+            current->RemovePassenger(bot);
+            // Put it on the pier: walking off a deck clips through the hull, or leaves the bot
+            // still aboard when the ferry departs again.
+            bot->NearTeleportTo(data.landPos.GetPositionX(), data.landPos.GetPositionY(),
+                                data.landPos.GetPositionZ(), bot->GetOrientation());
+            LOG_DEBUG("playerbots", "[New RPG] {} left ferry {} on map {}", bot->GetName(), data.transportEntry,
+                      bot->GetMapId());
+            info.ChangeToIdle();
+        }
+
+        return true;
+    }
+
+    // Was aboard and is no longer. The core keeps the transport attached across the map hop
+    // (TELE_TO_NOT_LEAVE_TRANSPORT), so this normally means we arrived - but if the ferry is
+    // still right here we simply slipped off, and re-boarding beats being dumped mid-ocean.
+    if (data.aboard)
+    {
+        if (bot->GetMapId() != data.landPos.GetMapId())
+        {
+            if (Transport* ferry = FindFerry(bot, data.transportEntry))
+            {
+                float const probeZ = std::max(bot->GetPositionZ(), ferry->GetPositionZ());
+                if (FerryUnderfoot(bot, bot->GetPositionX(), bot->GetPositionY(), probeZ) == ferry)
+                {
+                    ferry->AddPassenger(bot, true);
+                    bot->StopMovingOnCurrentPos();
+                    return true;
+                }
+            }
+        }
+
+        info.ChangeToIdle();
+        return true;
+    }
+
+    if (bot->GetMapId() != data.dockPos.GetMapId())
+    {
+        info.ChangeToIdle();
+        return true;
+    }
+
+    // --- walking to the pier ---
+    if (bot->GetExactDist2d(data.dockPos.GetPositionX(), data.dockPos.GetPositionY()) > FERRY_DOCK_ARRIVE_DIS)
+        return MoveFarTo(data.dockPos);
+
+    // --- waiting at the pier ---
+    if (!data.waitSinceMs)
+        data.waitSinceMs = now;
+    else if (GetMSTimeDiffToNow(data.waitSinceMs) > sPlayerbotAIConfig.smartTravelDockWaitMs)
+    {
+        LOG_DEBUG("playerbots", "[New RPG] {} gave up waiting for ferry {}", bot->GetName(), data.transportEntry);
+        info.ChangeToIdle();
+        return true;
+    }
+
+    Transport* ferry = FindFerry(bot, data.transportEntry);
+    if (!ferry)
+        return true;  // still on the far side of its loop
+
+    // Wait until it is parked, and until it is berthed here - the bot stands on the pier, so
+    // its own distance to the hull is the reliable test.
+    if (!TravelMgr::IsTransportParked(ferry))
+        return true;
+
+    if (bot->GetExactDist2d(ferry->GetPositionX(), ferry->GetPositionY()) > FERRY_BOARD_DIS)
+        return true;
+
+    // Step aboard rather than walk aboard: the navmesh knows nothing about a moving object and
+    // the model origin sits inside the hull, so walking at it means clipping through the boat.
+    WorldPosition deck;
+    if (!sTravelMgr.FindDeckSpot(ferry, bot, deck))
+        return true;
+
+    bot->NearTeleportTo(deck.GetPositionX(), deck.GetPositionY(), deck.GetPositionZ(), bot->GetOrientation());
+    ferry->AddPassenger(bot, true);
+    bot->StopMovingOnCurrentPos();
+    data.aboard = true;
+    data.waitSinceMs = now;
+    LOG_DEBUG("playerbots", "[New RPG] {} boarded ferry {} bound for map {}", bot->GetName(),
+              data.transportEntry, data.landPos.GetMapId());
+    return true;
 }
 
 bool NewRpgTravelFlightAction::Execute(Event /*event*/)

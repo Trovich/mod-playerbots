@@ -112,6 +112,16 @@ protected:
     const uint32 poiStayTime = 5 * 60 * 1000;
 };
 
+// Rides a boat / zeppelin to another continent: walk to the pier, wait for it, step aboard,
+// get off at the far dock. The core carries passengers over the map boundary itself.
+class NewRpgTravelFerryAction : public NewRpgBaseAction
+{
+public:
+    NewRpgTravelFerryAction(PlayerbotAI* botAI) : NewRpgBaseAction(botAI, "new rpg travel ferry") {}
+
+    bool Execute(Event event) override;
+};
+
 class NewRpgTravelFlightAction : public NewRpgBaseAction
 {
 public:

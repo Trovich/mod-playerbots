@@ -16,6 +16,8 @@
 #include <map>
 #include <random>
 
+class Transport;
+
 class Creature;
 class GuidPosition;
 class ObjectGuid;
@@ -876,6 +878,80 @@ public:
 
     FlightMasterInfo const* GetNearestFlightMasterInfo(Player* bot) const;
     std::vector<std::vector<uint32>> GetOptimalFlightDestinations(Player* bot);
+
+    // Taxi node path (chain of DBC taxi node ids, ready for Player::ActivateTaxiPathTo) that
+    // takes the bot's nearest flight master toward `goal`. `outArrival`, if given, receives the
+    // world position of the last taxi node so the caller can tell when the flight is "close
+    // enough". Empty result = no usable flight leg.
+    std::vector<uint32> GetFlightPathToward(Player* bot, WorldPosition const& goal,
+                                            WorldPosition* outArrival = nullptr);
+
+    // One inter-city portal jump that shortens a trip to `goal` on another continent. Returns
+    // true and fills the out params only when the bot is already standing in a supported hub
+    // (Dalaran / Shattrath) and a portal there leads to the goal's map. Picks the portal that
+    // lands closest to the goal.
+    struct PortalHop
+    {
+        WorldPosition staging;   // where in the hub the bot should stand before jumping
+        float         radius;    // how close to `staging` counts as "at the portal"
+        uint32        destMap;
+        WorldPosition destPos;
+    };
+    // `requireInReach` false also returns portals the bot must still walk to, so a caller can
+    // commit to walking there when no flight exists (Darnassus' only exit, for example).
+    bool FindPortalHop(Player* bot, WorldPosition const& goal, PortalHop& out, bool requireInReach = true) const;
+
+    // For a bot on a map that has a portal hub (Dalaran / Shattrath) but is not standing at it
+    // yet, and whose goal is on another map: the portal position to travel to first, after
+    // which FindPortalHop takes over. Returns false when no such intermediate hop helps.
+    bool GetPortalHubStaging(Player* bot, WorldPosition const& goal, WorldPosition& outHub) const;
+
+    // One place a moving transport (boat / zeppelin) docks, taken from the transport's own
+    // key frames, so no dock table has to be maintained by hand.
+    struct TransportStop
+    {
+        uint32 mapId = 0;
+        WorldPosition pos;
+        uint32 arriveTime = 0;     // ms into the transport's loop when it docks here
+        uint32 departureTime = 0;  // ms into the loop when it leaves again
+    };
+
+    struct TransportRoute
+    {
+        uint32 entry = 0;
+        uint32 pathTime = 0;
+        bool isZeppelin = false;
+        std::vector<TransportStop> stops;
+    };
+
+    // A usable ferry leg: which transport to board, where to wait for it, where it drops us.
+    struct TransportLeg
+    {
+        uint32 entry = 0;
+        TransportStop board;
+        TransportStop land;
+    };
+
+    // Built once at startup from the transports table + their transport templates.
+    void LoadTransportRoutes();
+
+    // Cheapest ferry that connects the bot's current map to the goal's map, scored by how
+    // close it lands to the goal. False when no transport bridges the two maps.
+    bool FindTransportLeg(Player* bot, WorldPosition const& goal, TransportLeg& out) const;
+
+    // A ferry a wandering bot could plausibly take right now: its dock is on the bot's map and
+    // within `maxDockDist`, and the far side is level-appropriate. Picks at random among the
+    // candidates so different bots take different boats. Used by the free-roaming RPG brain.
+    bool SelectRandomFerryLeg(Player* bot, float maxDockDist, TransportLeg& out) const;
+
+    // True while the transport is parked (not under way). Boarding a moving hull drops the bot
+    // in the water, so every board/leave decision waits for this.
+    static bool IsTransportParked(Transport* transport);
+
+    // A world position the collision confirms is on the transport's deck. Walking aboard is
+    // hopeless - the model origin normally sits inside the hull and the navmesh knows nothing
+    // about a moving object - so the bot steps on the way it steps through a portal.
+    bool FindDeckSpot(Transport* transport, Player* bot, WorldPosition& out) const;
     const std::vector<WorldLocation> GetTeleportLocations(Player* bot);
     const std::vector<WorldLocation> GetTravelHubs(Player* bot);
     std::vector<WorldLocation> GetCityLocations(Player* bot);
@@ -999,6 +1075,8 @@ private:
     std::map<uint8, std::vector<BankerLocation>> bankerLocsPerLevelCache;
     std::unordered_map<uint32, WorldLocation> bankerEntryToLocation;
     std::map<uint8, std::vector<WorldLocation>> locsPerLevelCache;
+    // Ferry routes (boats / zeppelins), derived from the transport templates at startup.
+    std::vector<TransportRoute> transportRoutes;
     std::unordered_map<uint32, std::vector<WorldLocation>> creatureSpawnsByTemplate;
     std::map<uint32, LevelBracket> zone2LevelBracket;
 };

@@ -160,6 +160,13 @@ AiPlayerbot.AllowGuildBots = 1
 # Allow linking accounts for shared altbot control
 AiPlayerbot.AllowTrustedAccountBots = 1
 
+# Accounts whose characters can never be turned into bots - neither random bots nor any
+# ".playerbot add" path (own account, guild, trusted-link). Comma-separated; each entry is
+# either a numeric account id or an account name. Unknown names are logged and skipped.
+# Empty = no restriction.
+# Example: AiPlayerbot.BotExcludedAccounts = "5,ADMIN,streamer_main"
+AiPlayerbot.BotExcludedAccounts = ""
+
 # Randombots will create guilds with nearby randombots
 # Note: currently, randombots will not invite more bots after a guild is created,
 # meaning randombot guilds will have only the 10 initial randombots needed to sign the charter
@@ -263,6 +270,13 @@ AiPlayerbot.UseFlyMountAtMinLevel = 60
 # Note: was level 70 during WotLK and TBC
 # Default: 70
 AiPlayerbot.UseFastFlyMountAtMinLevel = 70
+
+# When a bot mounts on its own (no nearby master, or catching up via smart travel), it only
+# gets the fast ground mount if its average equipped item level is at least this percent of
+# its character level; otherwise it rides the slow mount. 100 = ilvl must be >= level.
+# Raise it (e.g. 130) to require noticeably-above-level gear for the fast mount, 0 disables
+# the check (fast mount purely by riding skill, original behaviour).
+AiPlayerbot.FastMountMinGearPct = 100
 
 #
 #
@@ -429,6 +443,12 @@ AiPlayerbot.AlmostFullHealth = 85
 AiPlayerbot.LowMana = 15
 AiPlayerbot.MediumMana = 40
 AiPlayerbot.HighMana = 65
+
+# Percent chance a bot actually runs from a fight it would otherwise flee from every time
+# (the "panic" low-health/low-mana check and the "outnumbered" check). The roll is made once
+# per fight and held until combat ends, so the bot won't flicker between fleeing and fighting.
+# 100 = always flee (original behaviour); e.g. 60 = flees ~60% of such fights, fights the rest.
+AiPlayerbot.FleeChance = 100
 
 #
 #
@@ -682,6 +702,80 @@ AiPlayerbot.BotTaxiGapMs = 200
 
 # Extra small randomness added to each gap so launches don’t look robotic (ms)
 AiPlayerbot.BotTaxiGapJitterMs = 100
+
+#
+#
+####################################################################################################
+
+####################################################################################################
+# SMART TRAVEL
+#
+
+# When a follower bot is far from its master (another map, or farther than the distance
+# below on the same map), route it the sensible way instead of running in a straight line
+# through terrain: walk to the nearest flight master, fly toward the master, use the
+# Dalaran / Shattrath / Caverns of Time portal hubs when they shorten the trip, board
+# boats via the normal follow logic, then close the last stretch on foot.
+# 1 - enabled (default), 0 - keep the old straight-line follow
+AiPlayerbot.GroupSmartTravel = 1
+
+# Minimum same-map distance (yards) to the master before smart travel kicks in. Below this
+# the bot follows normally (short-range navmesh follow already routes around terrain). Keep
+# it near ~300 - PathGenerator's smooth-path cap - because beyond that plain follow degrades
+# to a straight line through the world, which is exactly what smart travel replaces.
+AiPlayerbot.GroupSmartTravelMinDist = 300
+
+# Cover the flight fare when a smart-travelling bot cannot pay it. Bots are not part of the
+# economy, and without this a low-gold bot simply stops at the flight master. 1 - on, 0 - off.
+AiPlayerbot.SmartTravelFreeFare = 1
+
+# While smart-travelling, sidestep idle hostile mobs that sit right on the path instead of
+# running straight through them (best-effort; PathGenerator-validated). 1 - on, 0 - off.
+AiPlayerbot.SmartTravelAvoidEnemies = 1
+
+# Last resort: teleport a grouped bot to its leader when the leader is on another map that
+# has no road route to it (no taxi link across the water, no portal hub within reach), so
+# the bot is not stranded forever. 0 = the bot just gives up instead. 1 - on, 0 - off.
+AiPlayerbot.SmartTravelTeleportFallback = 1
+
+# Keep a mid-trip bot running toward its goal after it aggroes trash on the way, instead of
+# stopping to fight (the trash leashes once outrun). Never applies vs players, elites or
+# bosses. 1 - on, 0 - off.
+AiPlayerbot.SmartTravelRunPastEnemies = 1
+
+# ...but only while the bot's health is at least this percent - below it, it stops and lets
+# the combat AI (fight / flee / heal) take over.
+AiPlayerbot.SmartTravelCombatMinHealth = 50
+
+# On the goal's own map, only walk the last stretch on the navmesh when it is within this many
+# yards AND actually navmesh-connected. Farther, or across an unlinked landmass on the same map
+# (e.g. Bloodmyst Isle and Hellfire Peninsula are both map 530), the bot uses the teleport
+# fallback instead of beelining across terrain / the ocean floor. Yards.
+AiPlayerbot.SmartTravelMaxWalkDist = 2000
+
+# Let bots ride boats and zeppelins across continents instead of falling back to a teleport.
+# The bot walks to the harbour, waits for the ferry, steps aboard and gets off at the far dock;
+# the core carries passengers over the map boundary by itself.
+AiPlayerbot.SmartTravelUseTransports = 1
+
+# Zeppelins use exactly the same mechanism as boats; kept on a separate switch so they can be
+# enabled after boats have been verified. Default: 0 (boats only)
+AiPlayerbot.SmartTravelUseZeppelins = 0
+
+# How long a bot will stand at a dock waiting for its ferry before giving up and re-planning.
+# A full ferry loop is several minutes, so keep this generous. Milliseconds.
+AiPlayerbot.SmartTravelDockWaitMs = 600000
+
+# Reject taxi routes longer than this many hops. Long cross-world flight relays run into gappy
+# DBC taxi data and can strand the bot mid-air with a dead flight spline; such routes fall back
+# to a portal hop / walk / teleport instead.
+AiPlayerbot.SmartTravelMaxTaxiHops = 6
+
+# When the core setting DungeonFinder.SkipTeleport is enabled, player bots in an LFG group
+# travel to the dungeon entrance on foot (using the smart travel above) and walk through
+# the portal instead of being teleported. Set to 0 to disable only the bot-side walking
+# (bots then stay put unless led). Default: follow DungeonFinder.SkipTeleport.
+AiPlayerbot.LfgWalkToDungeon = 0
 
 #
 #
@@ -1408,6 +1502,7 @@ AiPlayerbot.EnableNewRpgStrategy = 1
 # TravelFlight  (Default: 15  Go to the nearest flightmaster and fly to a level-appropriate area)
 # Rest          (Default: 5   Take a break for a while and do nothing)
 # OutdoorPvp    (Default: 10  Participate in outdoor PvP capture points if already in an outdoor PvP zone)
+# TravelFerry   (Default: 8   Ride a boat / zeppelin to another continent, the slow way)
 AiPlayerbot.RpgStatusProbWeight.WanderRandom = 15
 AiPlayerbot.RpgStatusProbWeight.WanderNpc = 20
 AiPlayerbot.RpgStatusProbWeight.GoGrind = 15
@@ -1416,6 +1511,11 @@ AiPlayerbot.RpgStatusProbWeight.DoQuest = 60
 AiPlayerbot.RpgStatusProbWeight.TravelFlight = 15
 AiPlayerbot.RpgStatusProbWeight.Rest = 5
 AiPlayerbot.RpgStatusProbWeight.OutdoorPvp = 10
+AiPlayerbot.RpgStatusProbWeight.TravelFerry = 8
+
+# How far a free-roaming bot will look for a ferry pier when it rolls the TravelFerry status.
+# Yards. Default: 1500
+AiPlayerbot.RpgFerryMaxDockDist = 1500
 
 # Bots' minimum and maximum level when teleporting in and out of a zone, according to the new RPG strategy
 # Format: AiPlayerbot.ZoneBracket.zoneID = minLevel,maxLevel

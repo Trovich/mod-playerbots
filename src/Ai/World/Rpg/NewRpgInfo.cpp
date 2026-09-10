@@ -52,6 +52,18 @@ void NewRpgInfo::ChangeToTravelFlight(uint32 flightMasterEntry, WorldPosition fl
     data = flight;
 }
 
+void NewRpgInfo::ChangeToTravelFerry(uint32 transportEntry, WorldPosition dockPos, WorldPosition landPos)
+{
+    startT = getMSTime();
+    TravelFerry ferry;
+    ferry.transportEntry = transportEntry;
+    ferry.dockPos = dockPos;
+    ferry.landPos = landPos;
+    ferry.waitSinceMs = 0;
+    ferry.aboard = false;
+    data = ferry;
+}
+
 void NewRpgInfo::ChangeToOutdoorPvp(ObjectGuid::LowType capturePointSpawnId)
 {
     startT = getMSTime();
@@ -101,6 +113,7 @@ NewRpgStatus NewRpgInfo::StatusFromString(std::string const& name)
     if (name == "go camp")        return RPG_GO_CAMP;
     if (name == "do quest")       return RPG_DO_QUEST;
     if (name == "travel flight")  return RPG_TRAVEL_FLIGHT;
+    if (name == "travel ferry")   return RPG_TRAVEL_FERRY;
     if (name == "outdoor pvp")    return RPG_OUTDOOR_PVP;
     return RPG_STATUS_END;
 }
@@ -117,6 +130,7 @@ NewRpgStatus NewRpgInfo::GetStatus()
         if constexpr (std::is_same_v<T, Rest>) return RPG_REST;
         if constexpr (std::is_same_v<T, DoQuest>) return RPG_DO_QUEST;
         if constexpr (std::is_same_v<T, TravelFlight>) return RPG_TRAVEL_FLIGHT;
+        if constexpr (std::is_same_v<T, TravelFerry>) return RPG_TRAVEL_FERRY;
         if constexpr (std::is_same_v<T, OutdoorPvP>) return RPG_OUTDOOR_PVP;
         return RPG_IDLE;
     }, data);
@@ -180,6 +194,16 @@ std::string NewRpgInfo::ToString()
             out << "\nfromNode: " << arg.path[0];
             out << "\ntoNode: " << arg.path[arg.path.size() - 1];
             out << "\ninFlight: " << arg.inFlight;
+        }
+        else if constexpr (std::is_same_v<T, TravelFerry>)
+        {
+            out << "TRAVEL_FERRY";
+            out << "\ntransportEntry: " << arg.transportEntry;
+            out << "\ndock: " << arg.dockPos.GetMapId() << " " << arg.dockPos.GetPositionX() << " "
+                << arg.dockPos.GetPositionY();
+            out << "\nland: " << arg.landPos.GetMapId() << " " << arg.landPos.GetPositionX() << " "
+                << arg.landPos.GetPositionY();
+            out << "\naboard: " << arg.aboard;
         }
         else if constexpr (std::is_same_v<T, OutdoorPvP>)
         {

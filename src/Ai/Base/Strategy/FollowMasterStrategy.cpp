@@ -13,6 +13,10 @@ std::vector<NextAction> FollowMasterStrategy::getDefaultActions()
     };
 }
 
-void FollowMasterStrategy::InitTriggers(std::vector<TriggerNode*>& /*triggers*/)
+void FollowMasterStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
 {
+    // Route a far-away follower to the master via flight masters / portal hubs instead of
+    // beelining. Higher relevance than the default "follow" action above; when no smart route
+    // exists the trigger stays inactive and plain follow is used.
+    triggers.push_back(new TriggerNode("follow travel needed", { NextAction("follow travel", 2.0f) }));
 }

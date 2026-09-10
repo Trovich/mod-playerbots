@@ -23,7 +23,26 @@ GuidVector AttackersValue::Calculate()
     AddAttackersOf(bot, targets);
 
     if (Group* group = bot->GetGroup())
+    {
         AddAttackersOf(group, targets);
+
+        // AddAttackersOf() above only looks at each member's GetThreatMgr().GetThreatenedByMeList() -
+        // ThreatManager::CanHaveThreatList() is hard-coded to creatures only (Unit::AddThreat() is a
+        // no-op for any player target), so a player attacker can never populate a party member's
+        // threat-derived "who's attacking me" list. That is invisible for normal PvP, but it also
+        // means a party member who was mind-controlled/charmed into attacking the group (e.g. Baroness
+        // Anastari in Stratholme) never shows up here no matter how hard they swing - nothing routes
+        // through a threat list on either side. Pick those up directly, off group membership and
+        // hostility rather than threat.
+        Group::MemberSlotList const& groupSlot = group->GetMemberSlots();
+        for (Group::member_citerator itr = groupSlot.begin(); itr != groupSlot.end(); itr++)
+        {
+            Player* member = ObjectAccessor::FindPlayer(itr->guid);
+            if (member && member != bot && member->IsInWorld() && member->IsAlive() &&
+                member->GetMapId() == bot->GetMapId() && !bot->IsFriendlyTo(member))
+                targets.insert(member);
+        }
+    }
 
     RemoveNonThreating(targets);
 

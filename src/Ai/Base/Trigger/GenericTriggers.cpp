@@ -16,11 +16,42 @@
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
 #include "PositionValue.h"
+#include "Random.h"
 #include "SharedDefines.h"
 #include "TemporarySummon.h"
 #include "ThreatManager.h"
 #include "Timer.h"
 #include <string>
+
+namespace
+{
+    // Sticky per-combat flee roll. AiPlayerbot.FleeChance is the percent chance a bot will run
+    // from a fight it would otherwise flee 100% of the time. Rolled once per fight and held so
+    // the decision doesn't flicker tick to tick. `decision` (0 = undecided, 1 = flee, 2 = hold)
+    // and `lastEvalMs` are caller-owned per-trigger state. Combat triggers stop being evaluated
+    // once the bot leaves combat, so a gap since the last evaluation is what tells us the
+    // previous fight ended and the next one must re-roll.
+    bool FleeChancePasses(Player* bot, int8& decision, uint32& lastEvalMs)
+    {
+        if (sPlayerbotAIConfig.fleeChance >= 100)
+            return true;
+
+        uint32 const now = getMSTime();
+        bool const freshFight = !bot->IsInCombat() || now - lastEvalMs > 5000;
+        lastEvalMs = now;
+
+        if (freshFight)
+            decision = 0;
+
+        if (!bot->IsInCombat())
+            return true;  // out of combat the flee triggers don't fire on these grounds anyway
+
+        if (decision == 0)
+            decision = roll_chance_i(static_cast<int32>(sPlayerbotAIConfig.fleeChance)) ? 1 : 2;
+
+        return decision == 1;
+    }
+}
 
 bool LowManaTrigger::IsActive()
 {
@@ -111,6 +142,9 @@ bool HasAggroTrigger::IsActive() { return AI_VALUE2(bool, "has aggro", "current 
 
 bool PanicTrigger::IsActive()
 {
+    if (!FleeChancePasses(bot, fleeDecision, fleeEvalMs))
+        return false;
+
     uint8 health = AI_VALUE2(uint8, "health", "self target");
 
     // PvP: bail out on low health regardless of remaining mana/energy, but only when the
@@ -129,6 +163,9 @@ bool PanicTrigger::IsActive()
 
 bool OutNumberedTrigger::IsActive()
 {
+    if (!FleeChancePasses(bot, fleeDecision, fleeEvalMs))
+        return false;
+
     if (bot->GetMap() && (bot->GetMap()->IsDungeon() || bot->GetMap()->IsRaid()))
         return false;
 

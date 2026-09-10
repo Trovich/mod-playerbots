@@ -15,16 +15,23 @@
 #include "MapCollisionData.h"
 #include "MapMgr.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "PathGenerator.h"
 #include "Playerbots.h"
 #include "RaceMgr.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "Talentspec.h"
+#include "Transport.h"
 #include "TransportMgr.h"
 #include "TravelNode.h"
 #include "VMapFactory.h"
 #include "VMapMgr2.h"
+#include <cmath>
 #include <iomanip>
+#include <limits>
 #include <numeric>
+#include <set>
 
 // Navigation data
 
@@ -4359,6 +4366,7 @@ void TravelMgr::Init()
         PrepareDestinationCache();
     }
     sTravelNodeMap.InitTaxiGraph();
+    LoadTransportRoutes();
     LOG_INFO("playerbots", "Playerbots Taxi graph and destination cache built.");
 }
 
@@ -4474,6 +4482,466 @@ std::vector<std::vector<uint32>> TravelMgr::GetOptimalFlightDestinations(Player*
     }
 
     return validDestinations;
+}
+
+std::vector<uint32> TravelMgr::GetFlightPathToward(Player* bot, WorldPosition const& goal, WorldPosition* outArrival)
+{
+    if (!bot)
+        return {};
+
+    FlightMasterInfo const* from = GetNearestFlightMasterInfo(bot);
+    if (!from || from->taxiNodeId == 0)
+        return {};
+
+    // The bot has to be able to reach that flight master on foot first.
+    if (bot->GetExactDist(from->pos.GetPositionX(), from->pos.GetPositionY(), from->pos.GetPositionZ()) > 500.0f)
+        return {};
+
+    uint32 toNode = sObjectMgr->GetNearestTaxiNode(goal.GetPositionX(), goal.GetPositionY(), goal.GetPositionZ(),
+                                                   goal.GetMapId(), bot->GetTeamId());
+    if (!toNode || toNode == from->taxiNodeId)
+        return {};
+
+    std::vector<uint32> path = sTravelNodeMap.FindTaxiPath(from->taxiNodeId, toNode);
+    if (path.size() < 2)
+        return {};
+
+    if (outArrival)
+    {
+        if (TaxiNodesEntry const* dest = sTaxiNodesStore.LookupEntry(toNode))
+            *outArrival = WorldPosition(dest->map_id, dest->x, dest->y, dest->z, 0.0f);
+    }
+
+    return path;
+}
+
+namespace
+{
+    // Inter-city portal objects, verified against gameobject_template (type 22 = spell caster)
+    // and their live spawn positions. `spellId` is the teleport the portal casts; the
+    // destination is deliberately NOT hardcoded here - it is read from spell_target_position at
+    // runtime, so a server that relocates a portal (or lacks the row) simply skips that entry.
+    //
+    // Only the two neutral hubs are listed. Note that a portal spell is not always the
+    // teleport itself: Ironforge (17607) is a SPELL_EFFECT_FORCE_CAST that makes the player
+    // cast 44089, and only 44089 carries the destination. ResolvePortalDestination follows
+    // that indirection, so no spell in this table needs special-casing.
+    struct PortalRow
+    {
+        uint32 hubMap;   // map the portal object stands on
+        float x, y, z;   // where it stands
+        uint32 spellId;  // teleport spell cast by the portal
+        TeamId team;     // TEAM_NEUTRAL = either faction may use it
+        uint8 minLevel;  // mirrors the spell's `conditions` level gate; 0 = ungated
+    };
+
+    PortalRow const PORTAL_ROWS[] =
+    {
+        // Dalaran, Silver Enclave (Alliance side).
+        { 571, 5719.19f, 719.68f, 641.73f, 17334, TEAM_ALLIANCE, 0 },  // Stormwind
+        { 571, 5712.68f, 724.84f, 641.74f, 17607, TEAM_ALLIANCE, 0 },  // Ironforge
+        { 571, 5706.16f, 730.10f, 641.74f, 17608, TEAM_ALLIANCE, 0 },  // Darnassus
+        { 571, 5699.58f, 735.47f, 641.77f, 32268, TEAM_ALLIANCE, 0 },  // Exodar
+        { 571, 5697.49f, 744.91f, 641.82f, 33728, TEAM_ALLIANCE, 0 },  // Shattrath
+        // Dalaran, Sunreaver's Sanctuary (Horde side).
+        { 571, 5925.85f, 593.25f, 640.56f, 17609, TEAM_HORDE, 0 },     // Orgrimmar
+        { 571, 5945.81f, 577.36f, 640.57f, 17610, TEAM_HORDE, 0 },     // Thunder Bluff
+        { 571, 5934.66f, 590.69f, 640.58f, 17611, TEAM_HORDE, 0 },     // Undercity
+        { 571, 5946.98f, 568.48f, 640.57f, 32270, TEAM_HORDE, 0 },     // Silvermoon
+        { 571, 5941.66f, 584.89f, 640.57f, 35718, TEAM_HORDE, 0 },     // Shattrath
+        // Dalaran, neutral.
+        { 571, 5781.48f, 841.26f, 680.38f, 59901, TEAM_NEUTRAL, 0 },   // Caverns of Time
+
+        // Shattrath, Terrace of Light (neutral ground, per-faction destinations).
+        { 530, -1792.78f, 5406.54f, -12.43f, 17334, TEAM_ALLIANCE, 0 },  // Stormwind
+        { 530, -1795.79f, 5399.63f, -12.43f, 17607, TEAM_ALLIANCE, 0 },  // Ironforge
+        { 530, -1790.98f, 5413.98f, -12.43f, 17608, TEAM_ALLIANCE, 0 },  // Darnassus
+        { 530, -1880.28f, 5357.53f, -12.43f, 32268, TEAM_ALLIANCE, 0 },  // Exodar
+        { 530, -1934.49f, 5453.48f, -12.43f, 17609, TEAM_HORDE, 0 },     // Orgrimmar
+        { 530, -1936.32f, 5445.95f, -12.43f, 17610, TEAM_HORDE, 0 },     // Thunder Bluff
+        { 530, -1931.48f, 5460.49f, -12.43f, 17611, TEAM_HORDE, 0 },     // Undercity
+        { 530, -1894.69f, 5362.34f, -12.43f, 32270, TEAM_HORDE, 0 },     // Silvermoon
+
+        // Capital -> Blasted Lands, at the foot of the Dark Portal. Level 58 mirrors the
+        // `conditions` row on 65728/65729 - the bot code teleports directly and would
+        // otherwise bypass that gate.
+        {   0, -9007.6f,   871.9f,  129.7f,  65728, TEAM_ALLIANCE, 58 },  // Stormwind
+        {   0, -4606.4f,  -929.0f,  501.1f,  65728, TEAM_ALLIANCE, 58 },  // Ironforge
+        {   1,  9661.8f,  2509.6f, 1331.6f,  65728, TEAM_ALLIANCE, 58 },  // Darnassus
+        { 530, -4037.8f,-11555.5f, -138.3f,  65728, TEAM_ALLIANCE, 58 },  // Exodar
+        {   0,  1768.8f,    55.4f,  -46.3f,  65729, TEAM_HORDE,    58 },  // Undercity
+        {   1,  1472.6f, -4215.7f,   59.2f,  65729, TEAM_HORDE,    58 },  // Orgrimmar
+        {   1,  -944.1f,   274.9f,  111.7f,  65729, TEAM_HORDE,    58 },  // Thunder Bluff
+        { 530,  9984.3f, -7107.6f,   47.7f,  65729, TEAM_HORDE,    58 },  // Silvermoon
+    };
+
+    // The Dark Portal is not a spell-casting object but a pair of area triggers, so its
+    // position and destination both come from the core at runtime. This is the only
+    // lore-correct crossing between the old world and Outland.
+    struct AreaTriggerHop
+    {
+        uint32 triggerId;
+        uint8 minLevel;
+    };
+
+    AreaTriggerHop const AREATRIGGER_HOPS[] =
+    {
+        { 4354, 58 },  // Dark Portal To Outland  (Blasted Lands -> Hellfire Peninsula)
+        { 4352, 0 },   // Outland To Dark Portal  (Hellfire Peninsula -> Blasted Lands)
+        // Darnassus <-> Rut'theran Village. Same map, but no navmesh connects them: the
+        // portal is the only way in or out, and Darnassus' flight master and boat dock are
+        // both on the Rut'theran side.
+        { 527, 0 },    // Teldrassil - Rut'theran  (Darnassus -> Rut'theran Village)
+        { 542, 0 },    // Teldrassil - Darnassus   (Rut'theran Village -> Darnassus)
+    };
+
+    // Where a portal spell actually sends the player. Most city portals are a plain
+    // SPELL_EFFECT_TELEPORT_UNITS whose destination sits in spell_target_position under their
+    // own id. Some are an indirection instead - Ironforge's 17607 is SPELL_EFFECT_FORCE_CAST
+    // and it is the forced spell (44089) that holds the destination - so follow TriggerSpell
+    // one level down before giving up. Returns nullptr when nothing resolves.
+    SpellTargetPosition const* ResolvePortalDestination(uint32 spellId, uint8 depth = 0)
+    {
+        for (uint8 eff = EFFECT_0; eff < MAX_SPELL_EFFECTS; ++eff)
+            if (SpellTargetPosition const* pos =
+                    sSpellMgr->GetSpellTargetPosition(spellId, static_cast<SpellEffIndex>(eff)))
+                return pos;
+
+        if (depth >= 2)
+            return nullptr;
+
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
+        if (!info)
+            return nullptr;
+
+        for (SpellEffectInfo const& eff : info->GetEffects())
+        {
+            if (!eff.TriggerSpell)
+                continue;
+
+            if (eff.Effect != SPELL_EFFECT_FORCE_CAST && eff.Effect != SPELL_EFFECT_FORCE_CAST_WITH_VALUE &&
+                eff.Effect != SPELL_EFFECT_TRIGGER_SPELL && eff.Effect != SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE)
+                continue;
+
+            if (SpellTargetPosition const* pos = ResolvePortalDestination(eff.TriggerSpell, depth + 1))
+                return pos;
+        }
+
+        return nullptr;
+    }
+
+    // How close the bot must already be for a portal to count as "in reach on foot".
+    constexpr float PORTAL_HUB_REACH = 400.0f;
+
+    // One usable crossing: where the bot must stand, and where it comes out.
+    struct PortalChoice
+    {
+        WorldPosition staging;
+        WorldPosition dest;
+    };
+
+    // Best crossing on the bot's current map for reaching `goal`. `inReach` selects between
+    // "I am standing at it" and "I still have to travel to it". Scores candidates by how close
+    // they land to the goal, which is also what keeps an Outland-bound bot out of the Exodar /
+    // Silvermoon portals: those also land on map 530, but on the detached Azuremyst / Eversong
+    // landmasses, thousands of yards from Outland proper with no navmesh connection to it.
+    // A same-map hop must actually buy something, or the bot would ping-pong through a portal
+    // (Darnassus -> Rut'theran -> Darnassus ...).
+    constexpr float PORTAL_SAME_MAP_GAIN = 300.0f;
+
+    bool PickPortal(Player* bot, WorldPosition const& goal, bool inReach, PortalChoice& out)
+    {
+        if (!bot)
+            return false;
+
+        bool found = false;
+        float bestScore = std::numeric_limits<float>::max();
+
+        auto consider = [&](WorldPosition const& staging, WorldPosition const& dest, uint8 minLevel)
+        {
+            if (minLevel && bot->GetLevel() < minLevel)
+                return;
+
+            if (staging.GetMapId() != bot->GetMapId() || dest.GetMapId() != goal.GetMapId())
+                return;
+
+            if ((bot->GetExactDist2d(staging.GetPositionX(), staging.GetPositionY()) <= PORTAL_HUB_REACH) != inReach)
+                return;
+
+            float const score = goal.GetExactDist2d(dest.GetPositionX(), dest.GetPositionY());
+
+            // Landing on the map we are already on only helps if it closes real distance -
+            // that is what makes the Darnassus / Rut'theran portal usable without looping.
+            if (dest.GetMapId() == bot->GetMapId() &&
+                score + PORTAL_SAME_MAP_GAIN >= goal.GetExactDist2d(bot->GetPositionX(), bot->GetPositionY()))
+                return;
+            if (score >= bestScore)
+                return;
+
+            bestScore = score;
+            found = true;
+            out.staging = staging;
+            out.dest = dest;
+        };
+
+        for (PortalRow const& row : PORTAL_ROWS)
+        {
+            if (row.team != TEAM_NEUTRAL && row.team != bot->GetTeamId())
+                continue;
+
+            SpellTargetPosition const* pos = ResolvePortalDestination(row.spellId);
+            if (!pos)
+                continue;
+
+            consider(WorldPosition(row.hubMap, row.x, row.y, row.z, 0.0f),
+                     WorldPosition(pos->target_mapId, pos->target_X, pos->target_Y, pos->target_Z,
+                                   pos->target_Orientation),
+                     row.minLevel);
+        }
+
+        for (AreaTriggerHop const& hop : AREATRIGGER_HOPS)
+        {
+            AreaTrigger const* at = sObjectMgr->GetAreaTrigger(hop.triggerId);
+            AreaTriggerTeleport const* tp = sObjectMgr->GetAreaTriggerTeleport(hop.triggerId);
+            if (!at || !tp)
+                continue;
+
+            consider(WorldPosition(at->map, at->x, at->y, at->z, at->orientation),
+                     WorldPosition(tp->target_mapId, tp->target_X, tp->target_Y, tp->target_Z,
+                                   tp->target_Orientation),
+                     hop.minLevel);
+        }
+
+        return found;
+    }
+}
+
+bool TravelMgr::FindPortalHop(Player* bot, WorldPosition const& goal, PortalHop& out, bool requireInReach) const
+{
+    PortalChoice choice;
+    if (!PickPortal(bot, goal, true, choice) && (requireInReach || !PickPortal(bot, goal, false, choice)))
+        return false;
+
+    out.staging = choice.staging;
+    out.radius = 12.0f;
+    out.destMap = choice.dest.GetMapId();
+    out.destPos = choice.dest;
+    return true;
+}
+
+bool TravelMgr::GetPortalHubStaging(Player* bot, WorldPosition const& goal, WorldPosition& outHub) const
+{
+    PortalChoice choice;
+    if (!PickPortal(bot, goal, false, choice))
+        return false;
+
+    outHub = choice.staging;
+    return true;
+}
+
+void TravelMgr::LoadTransportRoutes()
+{
+    transportRoutes.clear();
+
+    QueryResult result = WorldDatabase.Query("SELECT DISTINCT `entry` FROM `transports`");
+    if (!result)
+    {
+        LOG_INFO("playerbots", "Playerbots: no moving transports found - ferry travel disabled.");
+        return;
+    }
+
+    do
+    {
+        uint32 const entry = (*result)[0].Get<uint32>();
+
+        TransportTemplate const* tmpl = sTransportMgr->GetTransportTemplate(entry);
+        // Only continent ferries are useful: instance transports go nowhere a traveller needs,
+        // and a transport that never leaves one map cannot bridge two continents.
+        if (!tmpl || tmpl->inInstance || tmpl->mapsUsed.size() < 2)
+            continue;
+
+        TransportRoute route;
+        route.entry = entry;
+        route.pathTime = tmpl->pathTime;
+
+        if (GameObjectTemplate const* go = sObjectMgr->GetGameObjectTemplate(entry))
+            route.isZeppelin = go->name.find("Zeppelin") != std::string::npos;
+
+        std::set<uint32> stopMaps;
+        for (KeyFrame const& frame : tmpl->keyFrames)
+        {
+            if (!frame.Node || !frame.IsStopFrame())
+                continue;
+
+            TransportStop stop;
+            stop.mapId = frame.Node->mapid;
+            stop.pos = WorldPosition(frame.Node->mapid, frame.Node->x, frame.Node->y, frame.Node->z, 0.0f);
+            stop.arriveTime = frame.ArriveTime;
+            stop.departureTime = frame.DepartureTime;
+            route.stops.push_back(stop);
+            stopMaps.insert(stop.mapId);
+        }
+
+        // A ferry needs docks on at least two maps; otherwise there is nothing to route with.
+        if (stopMaps.size() < 2)
+            continue;
+
+        transportRoutes.push_back(std::move(route));
+    } while (result->NextRow());
+
+    LOG_INFO("playerbots", "Playerbots: loaded {} ferry route(s) for bot travel.", transportRoutes.size());
+}
+
+// Continents the game itself gates behind a level: sailing a level 20 bot to Northrend would
+// just strand it in content it cannot survive.
+static bool FerryDestinationSuitable(Player* bot, uint32 destMap)
+{
+    uint32 const level = bot->GetLevel();
+
+    if (destMap == 530)   // Outland
+        return level >= 58;
+    if (destMap == 571)   // Northrend
+        return level >= 68;
+
+    return true;
+}
+
+bool TravelMgr::IsTransportParked(Transport* transport)
+{
+    if (!transport)
+        return false;
+
+    // Only motion transports move; anything else (a lift, a static platform) is always parked.
+    if (MotionTransport* motion = dynamic_cast<MotionTransport*>(transport))
+        return !motion->IsMoving();
+
+    return true;
+}
+
+bool TravelMgr::FindDeckSpot(Transport* transport, Player* bot, WorldPosition& out) const
+{
+    Map* map = bot ? bot->GetMap() : nullptr;
+    if (!transport || !map)
+        return false;
+
+    float const ox = transport->GetPositionX();
+    float const oy = transport->GetPositionY();
+    float const oz = transport->GetPositionZ();
+    uint32 const phase = bot->GetPhaseMask();
+
+    // Sweep outward and upward from the model origin: the first point the collision reports as
+    // belonging to this transport is a spot the bot can legally stand on.
+    for (float dz = 2.0f; dz <= 24.0f; dz += 3.0f)
+        for (float r = 0.0f; r <= 24.0f; r += 4.0f)
+            for (uint8 a = 0; a < 8; ++a)
+            {
+                float const ang = static_cast<float>(a) * static_cast<float>(M_PI) / 4.0f;
+                float const x = ox + std::cos(ang) * r;
+                float const y = oy + std::sin(ang) * r;
+                float const z = oz + dz;
+
+                if (map->GetTransportForPos(phase, x, y, z, bot) != transport)
+                    continue;
+
+                out = WorldPosition(transport->GetMapId(), x, y, z, bot->GetOrientation());
+                return true;
+            }
+
+    return false;
+}
+
+bool TravelMgr::SelectRandomFerryLeg(Player* bot, float maxDockDist, TransportLeg& out) const
+{
+    if (!bot)
+        return false;
+
+    std::vector<TransportLeg> candidates;
+
+    for (TransportRoute const& route : transportRoutes)
+    {
+        if (route.isZeppelin && !sPlayerbotAIConfig.smartTravelUseZeppelins)
+            continue;
+
+        for (TransportStop const& board : route.stops)
+        {
+            if (board.mapId != bot->GetMapId())
+                continue;
+
+            if (bot->GetExactDist2d(board.pos.GetPositionX(), board.pos.GetPositionY()) > maxDockDist)
+                continue;
+
+            for (TransportStop const& land : route.stops)
+            {
+                if (land.mapId == board.mapId || !FerryDestinationSuitable(bot, land.mapId))
+                    continue;
+
+                TransportLeg leg;
+                leg.entry = route.entry;
+                leg.board = board;
+                leg.land = land;
+                candidates.push_back(leg);
+            }
+        }
+    }
+
+    if (candidates.empty())
+        return false;
+
+    out = candidates[urand(0, static_cast<uint32>(candidates.size()) - 1)];
+    return true;
+}
+
+bool TravelMgr::FindTransportLeg(Player* bot, WorldPosition const& goal, TransportLeg& out) const
+{
+    if (!bot || bot->GetMapId() == goal.GetMapId())
+        return false;
+
+    bool found = false;
+    float bestScore = std::numeric_limits<float>::max();
+
+    for (TransportRoute const& route : transportRoutes)
+    {
+        if (route.isZeppelin && !sPlayerbotAIConfig.smartTravelUseZeppelins)
+            continue;
+
+        TransportStop const* board = nullptr;
+        TransportStop const* land = nullptr;
+        float boardDist = std::numeric_limits<float>::max();
+        float landDist = std::numeric_limits<float>::max();
+
+        for (TransportStop const& stop : route.stops)
+        {
+            if (stop.mapId == bot->GetMapId())
+            {
+                float const d = bot->GetExactDist2d(stop.pos.GetPositionX(), stop.pos.GetPositionY());
+                if (d < boardDist)
+                {
+                    boardDist = d;
+                    board = &stop;
+                }
+            }
+            else if (stop.mapId == goal.GetMapId())
+            {
+                float const d = goal.GetExactDist2d(stop.pos.GetPositionX(), stop.pos.GetPositionY());
+                if (d < landDist)
+                {
+                    landDist = d;
+                    land = &stop;
+                }
+            }
+        }
+
+        if (!board || !land || landDist >= bestScore)
+            continue;
+
+        bestScore = landDist;
+        found = true;
+        out.entry = route.entry;
+        out.board = *board;
+        out.land = *land;
+    }
+
+    return found;
 }
 
 const std::vector<WorldLocation> TravelMgr::GetTeleportLocations(Player* bot)

@@ -46,6 +46,10 @@ public:
 
 private:
     Player* master;
+    // True when the bot is on another map from its master, or well out of sight of it
+    // (e.g. catching up via flight paths). Then it mounts on its own, by riding-skill tier,
+    // instead of only mirroring the master's mount state.
+    bool separatedFromMaster = false;
     ShapeshiftForm masterInShapeshiftForm;
     ShapeshiftForm botInShapeshiftForm;
     static std::unordered_map<uint32, PreferredMountCache> mountCache;
@@ -54,6 +58,11 @@ private:
     float CalculateMountDistance() const;
     void Dismount();
     void ClearStaleFlightFlags();
+    // True when a gathering node (ore vein, herb) the bot can still work on is
+    // within interaction range. Nodes that take several gathers would otherwise
+    // make the bot remount between every swing, since the loot target is
+    // cleared after each one.
+    bool HasGatherableNodeInReach();
     bool ShouldFollowMasterMountState(Player* master, bool noAttackers, bool shouldMount) const;
     bool ShouldDismountForMaster(Player* master) const;
     int32 CalculateMasterMountSpeed(Player* master) const;

@@ -71,7 +71,9 @@ enum NewRpgStatus : int
     // Taking a break
     RPG_REST = 7,
     RPG_OUTDOOR_PVP = 8,
-    RPG_STATUS_END = 9
+    // Ride a boat / zeppelin to another continent, the slow way a player would
+    RPG_TRAVEL_FERRY = 9,
+    RPG_STATUS_END = 10
 };
 
 #define MAX_SPECNO 20
@@ -97,6 +99,9 @@ public:
     bool Initialize();
     void LoadRandomBotLevelConfig();
     bool IsInRandomAccountList(uint32 id);
+    // True if characters on this account are barred from ever becoming bots (config
+    // AiPlayerbot.BotExcludedAccounts). Applies to random bots and every .playerbot add path.
+    bool IsBotExcludedAccount(uint32 accountId);
     bool IsInRandomQuestItemList(uint32 id);
     bool IsPvpProhibited(uint32 zoneId, uint32 areaId);
     bool IsInPvpProhibitedZone(uint32 id);
@@ -115,6 +120,12 @@ public:
         targetPosRecalcDistance, farDistance, healDistance, aggroDistance;
     uint32 criticalHealth, lowHealth, mediumHealth, almostFullHealth;
     uint32 lowMana, mediumMana, highMana;
+    // percent chance a bot actually runs from a fight it would otherwise always flee (panic /
+    // outnumbered); 100 = always flee (original behaviour). Rolled once per combat.
+    uint32 fleeChance;
+    // a self-mounting bot only gets the fast ground mount when its average equipped item level
+    // is at least this percent of its character level (100 = ilvl >= level). Higher = stricter.
+    uint32 fastMountMinGearPct;
     bool autoSaveMana;
     uint32 saveManaThreshold;
     AutoPartyBuffMode autoGreaterBlessings;
@@ -150,6 +161,7 @@ public:
     std::vector<uint32> randomBotMaps;
     std::vector<uint32> randomBotQuestItems;
     std::vector<uint32> randomBotAccounts;
+    std::vector<uint32> botExcludedAccounts;
     std::vector<uint32> randomBotSpellIds;
     std::vector<uint32> randomBotQuestIds;
     uint32 randomBotTeleportDistance;
@@ -460,6 +472,40 @@ public:
     uint32 botTaxiDelayMax;
     uint32 botTaxiGapMs;
     uint32 botTaxiGapJitterMs;
+
+    // smart long-distance travel for followers (walk to a flight master, fly toward the
+    // master, use inter-city portal hubs, then walk in) instead of beelining
+    bool groupSmartTravel;
+    float groupSmartTravelMinDist;
+    // cover the taxi fare when a smart-travelling bot cannot afford it (bots are not
+    // economy-relevant; without this a broke bot just stops at the flight master)
+    bool smartTravelFreeFare;
+    // sidestep idle hostile mobs sitting on the travel path instead of running through them
+    bool smartTravelAvoidEnemies;
+    // last resort: teleport a grouped bot to its leader when the goal is on another map with
+    // no road route to it (no taxi link, no portal hub) - otherwise the bot is stranded
+    bool smartTravelTeleportFallback;
+    // keep running toward the travel goal after aggroing trash mid-trip (mobs leash once
+    // outrun), instead of stopping to fight; disabled below this health %
+    bool smartTravelRunPastEnemies;
+    uint32 smartTravelCombatMinHealth;
+    // on the goal's own map, only walk the final stretch on the navmesh when it is within this
+    // many yards and actually navmesh-connected; farther / unreachable => teleport fallback, so
+    // a bot on a detached landmass (e.g. Bloodmyst Isle) does not swim across the ocean floor
+    float smartTravelMaxWalkDist;
+    // reject taxi routes longer than this many hops; long cross-world BFS relays run into gappy
+    // DBC taxi data and can strand the bot mid-flight with a dead spline
+    uint32 smartTravelMaxTaxiHops;
+    // ride boats / zeppelins across continents instead of falling back to a teleport
+    bool smartTravelUseTransports;
+    // zeppelins are the same mechanism as boats; kept separate so they can be rolled out after
+    bool smartTravelUseZeppelins;
+    // give up waiting at a dock after this long (a full ferry loop is minutes)
+    uint32 smartTravelDockWaitMs;
+    // how far a free-roaming bot will look for a ferry pier when it rolls the TravelFerry status
+    float rpgFerryMaxDockDist;
+    // player bots travel to the dungeon entrance on foot when DungeonFinder.SkipTeleport is on
+    bool lfgWalkToDungeon;
 
     std::string const GetTimestampStr();
     bool hasLog(std::string const fileName)
