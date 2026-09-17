@@ -879,32 +879,83 @@ public:
     FlightMasterInfo const* GetNearestFlightMasterInfo(Player* bot) const;
     std::vector<std::vector<uint32>> GetOptimalFlightDestinations(Player* bot);
 
-    // Taxi node path (chain of DBC taxi node ids, ready for Player::ActivateTaxiPathTo) that
-    // takes the bot's nearest flight master toward `goal`. `outArrival`, if given, receives the
-    // world position of the last taxi node so the caller can tell when the flight is "close
-    // enough". Empty result = no usable flight leg.
-    std::vector<uint32> GetFlightPathToward(Player* bot, WorldPosition const& goal,
-                                            WorldPosition* outArrival = nullptr);
-
-    // One inter-city portal jump that shortens a trip to `goal` on another continent. Returns
-    // true and fills the out params only when the bot is already standing in a supported hub
-    // (Dalaran / Shattrath) and a portal there leads to the goal's map. Picks the portal that
-    // lands closest to the goal.
-    struct PortalHop
+    // A travel region is a part of a map that is walkable in itself but cut off from the rest of
+    // that map: Teldrassil's canopy (Darnassus) and Rut'theran Village below it, Azuremyst and
+    // Eversong on the Outland map, Dalaran above Crystalsong. Regions - not maps - are what
+    // portals and ferries connect, and what "can I walk there" is really asking. Unique across maps.
+    static uint32 GetTravelRegion(uint32 mapId, float x, float y, float z);
+    static uint32 GetTravelRegion(WorldPosition const& pos)
     {
-        WorldPosition staging;   // where in the hub the bot should stand before jumping
-        float         radius;    // how close to `staging` counts as "at the portal"
-        uint32        destMap;
-        WorldPosition destPos;
-    };
-    // `requireInReach` false also returns portals the bot must still walk to, so a caller can
-    // commit to walking there when no flight exists (Darnassus' only exit, for example).
-    bool FindPortalHop(Player* bot, WorldPosition const& goal, PortalHop& out, bool requireInReach = true) const;
+        return GetTravelRegion(pos.GetMapId(), pos.GetPositionX(), pos.GetPositionY(), pos.GetPositionZ());
+    }
 
-    // For a bot on a map that has a portal hub (Dalaran / Shattrath) but is not standing at it
-    // yet, and whose goal is on another map: the portal position to travel to first, after
-    // which FindPortalHop takes over. Returns false when no such intermediate hop helps.
-    bool GetPortalHubStaging(Player* bot, WorldPosition const& goal, WorldPosition& outHub) const;
+    // One way from one region to another that is not a taxi: a portal / area trigger, or a ferry.
+    struct TravelEdge
+    {
+        enum class Kind : uint8
+        {
+            Portal,  // step through at `staging`, come out at `dest`
+            Taxi,    // fly from the flight master at `staging` to the node at `dest`
+            Ferry    // board at the `staging` pier, get off at the `dest` pier
+        };
+
+        Kind kind = Kind::Portal;
+        uint32 fromRegion = 0;
+        uint32 toRegion = 0;
+        WorldPosition staging;
+        WorldPosition dest;
+        TeamId team = TEAM_NEUTRAL;
+        uint8 minLevel = 0;
+        uint32 transportEntry = 0;  // ferry only
+        bool zeppelin = false;      // ferry only
+        uint32 taxiFrom = 0;        // taxi only: DBC node ids
+        uint32 taxiTo = 0;
+    };
+
+    // First step of the shortest chain of portals / ferries leading from the bot's region to the
+    // goal's region (fewest hops; ties go to the nearest step). False when the goal is in the
+    // bot's own region or no chain exists for this bot (faction, level, disabled transports).
+    bool NextTravelEdge(Player* bot, WorldPosition const& goal, TravelEdge& out) const;
+
+    // The flight master standing at a DBC taxi node for this faction, or nullptr.
+    FlightMasterInfo const* GetFlightMasterForNode(uint32 taxiNode, TeamId team) const;
+
+    // Taxi node chain between two DBC nodes (empty when not connected).
+    std::vector<uint32> GetTaxiRoute(uint32 fromNode, uint32 toNode) const;
+
+    // Shortest flight (by flight length) between two taxi nodes over one faction's own network: directed DBC paths
+    // with real geometry that never cross a map and never touch a transport or flavour node. The plain taxi BFS
+    // above knows none of that - its "shortest" chain can run through ship routes, test nodes and other continents.
+    // Empty when not connected.
+    std::vector<uint32> GetFactionTaxiRoute(uint32 fromNode, uint32 toNode, TeamId team) const;
+
+    // A flight a travelling bot can take toward `target`.
+    struct FlightPlan
+    {
+        FlightMasterInfo const* flightMaster = nullptr;  // where to board: in the bot's own travel region
+        std::vector<uint32> nodes;                       // ready for Player::ActivateTaxiPathTo
+        WorldPosition arrival;                           // the last node
+        float walkDist = 0.0f;                           // bot -> flight master, straight line
+        float landDist = 0.0f;                           // arrival -> target, straight line
+    };
+
+    // The best flight toward `target`: from one of the few nearest flight masters in the bot's travel region (no
+    // farther than `maxWalk`) to the node of the bot's faction nearest the target within the target's travel region.
+    // False when there is none.
+    bool PlanFlightToward(Player* bot, WorldPosition const& target, float maxWalk, FlightPlan& out) const;
+
+    // The flight master of `team` nearest to `pos` within the same travel region, or nullptr.
+    FlightMasterInfo const* GetFlightMasterNear(WorldPosition const& pos, TeamId team) const;
+
+    // Takes the bot off whatever transport it is linked to and clears every trace of the link: the transport
+    // pointer, the on-transport flag and offset, and the "ignore pathfinding" state MotionTransport::AddPassenger
+    // sets. Transport::RemovePassenger without `withAll`, and Player::TeleportTo, leave some of that behind. A real
+    // player's client repairs it with its next movement packet; a bot never sends one, so every later spline of the
+    // bot runs in transport space (it snaps to the map origin) or skips the navmesh (it walks through terrain).
+    static void DetachFromTransport(Player* bot);
+
+    // True when the bot carries such leftovers while not riding any transport this map still owns.
+    static bool HasStaleTransportLink(Player* bot);
 
     // One place a moving transport (boat / zeppelin) docks, taken from the transport's own
     // key frames, so no dock table has to be maintained by hand.
@@ -935,11 +986,7 @@ public:
     // Built once at startup from the transports table + their transport templates.
     void LoadTransportRoutes();
 
-    // Cheapest ferry that connects the bot's current map to the goal's map, scored by how
-    // close it lands to the goal. False when no transport bridges the two maps.
-    bool FindTransportLeg(Player* bot, WorldPosition const& goal, TransportLeg& out) const;
-
-    // A ferry a wandering bot could plausibly take right now: its dock is on the bot's map and
+    // A ferry a wandering bot could plausibly take right now: its dock is in the bot's region and
     // within `maxDockDist`, and the far side is level-appropriate. Picks at random among the
     // candidates so different bots take different boats. Used by the free-roaming RPG brain.
     bool SelectRandomFerryLeg(Player* bot, float maxDockDist, TransportLeg& out) const;
@@ -952,6 +999,14 @@ public:
     // hopeless - the model origin normally sits inside the hull and the navmesh knows nothing
     // about a moving object - so the bot steps on the way it steps through a portal.
     bool FindDeckSpot(Transport* transport, Player* bot, WorldPosition& out) const;
+
+    // Dry ground beside a parked transport, closest to `nearPos` (normally the dock stop). Used to
+    // step ashore - walking off a hull the navmesh cannot see leaves the bot dragged behind it.
+    bool FindPierSpot(Transport* transport, Player* bot, WorldPosition const& nearPos, WorldPosition& out) const;
+
+    // A random dry spot on the pier beside a dock stop, so bots waiting for the same ferry stand
+    // side by side instead of stacking on the dock key frame.
+    bool FindDockWaitSpot(Player* bot, WorldPosition const& dock, WorldPosition& out) const;
     const std::vector<WorldLocation> GetTeleportLocations(Player* bot);
     const std::vector<WorldLocation> GetTravelHubs(Player* bot);
     std::vector<WorldLocation> GetCityLocations(Player* bot);
@@ -1077,6 +1132,12 @@ private:
     std::map<uint8, std::vector<WorldLocation>> locsPerLevelCache;
     // Ferry routes (boats / zeppelins), derived from the transport templates at startup.
     std::vector<TransportRoute> transportRoutes;
+    // Portals, area triggers and ferry legs between travel regions, built after the routes.
+    std::vector<TravelEdge> travelEdges;
+    void BuildTravelEdges();
+    // Per faction (TEAM_ALLIANCE, TEAM_HORDE): taxi node -> (next node, flight length). Built once at startup.
+    std::unordered_map<uint32, std::vector<std::pair<uint32, float>>> factionTaxiGraph[2];
+    void BuildFactionTaxiGraph();
     std::unordered_map<uint32, std::vector<WorldLocation>> creatureSpawnsByTemplate;
     std::map<uint32, LevelBracket> zone2LevelBracket;
 };

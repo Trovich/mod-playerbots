@@ -494,7 +494,7 @@ bool PlayerbotAIConfig::Initialize()
     smartTravelTeleportFallback = sConfigMgr->GetOption<bool>("AiPlayerbot.SmartTravelTeleportFallback", true);
     smartTravelRunPastEnemies = sConfigMgr->GetOption<bool>("AiPlayerbot.SmartTravelRunPastEnemies", true);
     smartTravelCombatMinHealth = sConfigMgr->GetOption<uint32>("AiPlayerbot.SmartTravelCombatMinHealth", 50);
-    smartTravelMaxWalkDist = sConfigMgr->GetOption<float>("AiPlayerbot.SmartTravelMaxWalkDist", 2000.0f);
+    smartTravelTeleportNearDist = sConfigMgr->GetOption<float>("AiPlayerbot.SmartTravelTeleportNearDist", 100.0f);
     smartTravelMaxTaxiHops = sConfigMgr->GetOption<uint32>("AiPlayerbot.SmartTravelMaxTaxiHops", 6);
     smartTravelUseTransports = sConfigMgr->GetOption<bool>("AiPlayerbot.SmartTravelUseTransports", true);
     smartTravelUseZeppelins = sConfigMgr->GetOption<bool>("AiPlayerbot.SmartTravelUseZeppelins", false);

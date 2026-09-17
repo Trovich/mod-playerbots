@@ -7,4 +7,10 @@
 #include "NewRpgTriggers.h"
 #include "PlayerbotAI.h"
 
-bool NewRpgStatusTrigger::IsActive() { return status == botAI->rpgInfo.GetStatus(); }
+// The free-roaming brain has no business steering a bot that plays alongside a real player: its
+// stale goal (a quest spot, a grind camp) would pull the bot away - or, after a summon, teleport it
+// straight back there once the old stuck timer fires.
+bool NewRpgStatusTrigger::IsActive()
+{
+    return status == botAI->rpgInfo.GetStatus() && !botAI->HasRealPlayerInGroup();
+}

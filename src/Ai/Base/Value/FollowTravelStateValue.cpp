@@ -11,6 +11,7 @@ void FollowTravelState::Clear()
     // NB: cooldownUntilMs is deliberately preserved - it outlives a single trip.
     phase = FollowTravelPhase::None;
     goal = WorldPosition();
+    planGoal = WorldPosition();
     goalIsDungeon = false;
     dungeonInside = WorldPosition();
     flightMasterEntry = 0;
@@ -26,15 +27,24 @@ void FollowTravelState::Clear()
     dockPos = WorldPosition();
     landPos = WorldPosition();
     dockWaitSinceMs = 0;
+    deckPos = WorldPosition();
+    waitPos = WorldPosition();
+    waitPosTried = false;
     portalStaging = WorldPosition();
     portalDestMap = 0;
     portalDestPos = WorldPosition();
     swimSinceMs = 0;
+    approachPos = WorldPosition();
+    approachTries = 0;
     moveFarPos = WorldPosition();
     nearestMoveFarDis = FLT_MAX;
     stuckSinceMs = 0;
     stuckAttempts = 0;
     giveUpAtMs = 0;
+    legFails = 0;
+    onRoute = false;
+    nextStepSearchMs = 0;
+    pendingSinceMs = 0;
     nextMountPokeMs = 0;
 }
 
@@ -45,4 +55,6 @@ void FollowTravelState::ResetLeg(WorldPosition const& legTarget)
     swimSinceMs = 0;
     stuckSinceMs = 0;
     stuckAttempts = 0;
+    onRoute = false;
+    nextStepSearchMs = 0;
 }

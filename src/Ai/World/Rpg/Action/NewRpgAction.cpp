@@ -652,21 +652,8 @@ bool NewRpgDoQuestAction::DoCompletedQuest(NewRpgInfo::DoQuest& data)
 
 namespace
 {
-    // Same tolerant deck probe FollowTravelAction uses: GetTransportForPos raycasts from a
-    // fixed height and is fussy about the exact Z.
-    Transport* FerryUnderfoot(Player* bot, float x, float y, float z)
-    {
-        Map* map = bot->GetMap();
-        if (!map)
-            return nullptr;
-
-        for (float const pz : { z, z + 0.5f, z + 1.5f, z - 0.5f })
-            if (Transport* t = map->GetTransportForPos(bot->GetPhaseMask(), x, y, pz, bot))
-                return t;
-
-        return nullptr;
-    }
-
+    // The ferry we mean to ride, if it is currently on the bot's map (a cross-continent ship
+    // lives in exactly one map's container at a time).
     Transport* FindFerry(Player* bot, uint32 entry)
     {
         Map* map = bot->GetMap();
@@ -682,7 +669,9 @@ namespace
 
     constexpr float FERRY_DOCK_ARRIVE_DIS = 25.0f;
     constexpr float FERRY_BOARD_DIS = 80.0f;   // bot-to-hull distance that counts as "berthed here"
-    constexpr float FERRY_LEAVE_DIS = 120.0f;  // bot-to-dock distance that counts as "we have arrived"
+    constexpr float FERRY_LAND_DIS = 120.0f;   // on deck this close to the destination stop = arrived
+    constexpr float FERRY_WAIT_PICK_DIS = 70.0f; // pick a personal pier spot once this close to the dock
+    constexpr float FERRY_WAIT_SPOT_DIS = 2.5f;  // standing on that spot
 }
 
 bool NewRpgTravelFerryAction::Execute(Event /*event*/)
@@ -699,52 +688,40 @@ bool NewRpgTravelFerryAction::Execute(Event /*event*/)
     if (Transport* current = bot->GetTransport())
     {
         data.aboard = true;
+        data.deckPos = WorldPosition();
 
-        // Give up rather than circle forever if the far dock never matches.
-        if (data.waitSinceMs && GetMSTimeDiffToNow(data.waitSinceMs) > sPlayerbotAIConfig.smartTravelDockWaitMs)
-        {
-            current->RemovePassenger(bot);
-            info.ChangeToIdle();
+        bool const tooLong =
+            data.waitSinceMs && GetMSTimeDiffToNow(data.waitSinceMs) > sPlayerbotAIConfig.smartTravelDockWaitMs;
+
+        // Get off only while parked at the destination pier, judged by where we stand on the deck.
+        bool const arrived = bot->GetMapId() == data.landPos.GetMapId() &&
+                             TravelMgr::IsTransportParked(current) &&
+                             bot->GetExactDist2d(data.landPos.GetPositionX(), data.landPos.GetPositionY()) <
+                                 FERRY_LAND_DIS;
+
+        if (!tooLong && !arrived)
             return true;
-        }
 
-        // Berthed on the far side: step ashore. Measured from the bot, which rides with the
-        // hull - the transport's own origin is offset from the route's stop node.
-        if (bot->GetMapId() == data.landPos.GetMapId() && TravelMgr::IsTransportParked(current) &&
-            bot->GetExactDist2d(data.landPos.GetPositionX(), data.landPos.GetPositionY()) < FERRY_LEAVE_DIS)
-        {
-            current->RemovePassenger(bot);
-            // Put it on the pier: walking off a deck clips through the hull, or leaves the bot
-            // still aboard when the ferry departs again.
-            bot->NearTeleportTo(data.landPos.GetPositionX(), data.landPos.GetPositionY(),
-                                data.landPos.GetPositionZ(), bot->GetOrientation());
-            LOG_DEBUG("playerbots", "[New RPG] {} left ferry {} on map {}", bot->GetName(), data.transportEntry,
-                      bot->GetMapId());
-            info.ChangeToIdle();
-        }
+        WorldPosition pier;
+        bool const havePier = sTravelMgr.FindPierSpot(current, bot, data.landPos, pier);
+        if (arrived && !havePier && !tooLong)
+            return true;  // still parked - look for dry ground again next tick
 
+        // Detach first - fully, or the bot keeps a dangling link to the ship - then hop ashore; walking
+        // off a hull the navmesh cannot see leaves the bot dragged behind the departing ship.
+        TravelMgr::DetachFromTransport(bot);
+        if (havePier)
+            bot->NearTeleportTo(pier.GetPositionX(), pier.GetPositionY(), pier.GetPositionZ(), bot->GetOrientation());
+
+        LOG_DEBUG("playerbots", "[New RPG] {} left ferry {} on map {}", bot->GetName(), data.transportEntry,
+                  bot->GetMapId());
+        info.ChangeToIdle();
         return true;
     }
 
-    // Was aboard and is no longer. The core keeps the transport attached across the map hop
-    // (TELE_TO_NOT_LEAVE_TRANSPORT), so this normally means we arrived - but if the ferry is
-    // still right here we simply slipped off, and re-boarding beats being dumped mid-ocean.
+    // Was aboard and no longer is: the crossing is over. Resume normal life.
     if (data.aboard)
     {
-        if (bot->GetMapId() != data.landPos.GetMapId())
-        {
-            if (Transport* ferry = FindFerry(bot, data.transportEntry))
-            {
-                float const probeZ = std::max(bot->GetPositionZ(), ferry->GetPositionZ());
-                if (FerryUnderfoot(bot, bot->GetPositionX(), bot->GetPositionY(), probeZ) == ferry)
-                {
-                    ferry->AddPassenger(bot, true);
-                    bot->StopMovingOnCurrentPos();
-                    return true;
-                }
-            }
-        }
-
         info.ChangeToIdle();
         return true;
     }
@@ -755,8 +732,56 @@ bool NewRpgTravelFerryAction::Execute(Event /*event*/)
         return true;
     }
 
+    Transport* ferry = FindFerry(bot, data.transportEntry);
+
+    // --- second half of boarding ---
+    // AddPassenger records the offset from our current position, so only attach once the hop
+    // onto the deck has really been applied; attaching early glues the bot to the ship at pier
+    // coordinates and it trails through the air.
+    if (data.deckPos)
+    {
+        if (bot->IsBeingTeleported())
+            return true;
+
+        if (ferry && TravelMgr::IsTransportParked(ferry) &&
+            bot->GetExactDist(data.deckPos.GetPositionX(), data.deckPos.GetPositionY(), data.deckPos.GetPositionZ()) <
+                4.0f)
+        {
+            ferry->AddPassenger(bot, true);
+            bot->StopMovingOnCurrentPos();
+            data.deckPos = WorldPosition();
+            data.waitPos = WorldPosition();
+            data.aboard = true;
+            data.waitSinceMs = now;
+            LOG_DEBUG("playerbots", "[New RPG] {} boarded ferry {} bound for map {}", bot->GetName(),
+                      data.transportEntry, data.landPos.GetMapId());
+            return true;
+        }
+
+        // It sailed between hop and attach - step back onto our spot on the pier and wait again.
+        data.deckPos = WorldPosition();
+        WorldPosition const& back = data.waitPos ? data.waitPos : data.dockPos;
+        bot->NearTeleportTo(back.GetPositionX(), back.GetPositionY(), back.GetPositionZ(), bot->GetOrientation());
+        return true;
+    }
+
     // --- walking to the pier ---
-    if (bot->GetExactDist2d(data.dockPos.GetPositionX(), data.dockPos.GetPositionY()) > FERRY_DOCK_ARRIVE_DIS)
+    // Once in the harbour, claim a personal spot on the pier so bots waiting for the same ship
+    // stand side by side instead of stacking on the dock key frame.
+    if (!data.waitPosTried &&
+        bot->GetExactDist2d(data.dockPos.GetPositionX(), data.dockPos.GetPositionY()) < FERRY_WAIT_PICK_DIS)
+    {
+        data.waitPosTried = true;
+        sTravelMgr.FindDockWaitSpot(bot, data.dockPos, data.waitPos);
+    }
+
+    if (data.waitPos)
+    {
+        if (bot->GetExactDist2d(data.waitPos.GetPositionX(), data.waitPos.GetPositionY()) > FERRY_WAIT_SPOT_DIS)
+            return MoveTo(data.waitPos.GetMapId(), data.waitPos.GetPositionX(), data.waitPos.GetPositionY(),
+                          data.waitPos.GetPositionZ(), false, false, false, true);
+    }
+    else if (bot->GetExactDist2d(data.dockPos.GetPositionX(), data.dockPos.GetPositionY()) > FERRY_DOCK_ARRIVE_DIS)
         return MoveFarTo(data.dockPos);
 
     // --- waiting at the pier ---
@@ -769,31 +794,17 @@ bool NewRpgTravelFerryAction::Execute(Event /*event*/)
         return true;
     }
 
-    Transport* ferry = FindFerry(bot, data.transportEntry);
-    if (!ferry)
-        return true;  // still on the far side of its loop
-
-    // Wait until it is parked, and until it is berthed here - the bot stands on the pier, so
-    // its own distance to the hull is the reliable test.
-    if (!TravelMgr::IsTransportParked(ferry))
+    // Stand still until the ship is parked right here - no chasing, no pacing on the pier.
+    if (!ferry || !TravelMgr::IsTransportParked(ferry) ||
+        bot->GetExactDist2d(ferry->GetPositionX(), ferry->GetPositionY()) > FERRY_BOARD_DIS)
         return true;
 
-    if (bot->GetExactDist2d(ferry->GetPositionX(), ferry->GetPositionY()) > FERRY_BOARD_DIS)
-        return true;
-
-    // Step aboard rather than walk aboard: the navmesh knows nothing about a moving object and
-    // the model origin sits inside the hull, so walking at it means clipping through the boat.
     WorldPosition deck;
     if (!sTravelMgr.FindDeckSpot(ferry, bot, deck))
         return true;
 
+    data.deckPos = deck;
     bot->NearTeleportTo(deck.GetPositionX(), deck.GetPositionY(), deck.GetPositionZ(), bot->GetOrientation());
-    ferry->AddPassenger(bot, true);
-    bot->StopMovingOnCurrentPos();
-    data.aboard = true;
-    data.waitSinceMs = now;
-    LOG_DEBUG("playerbots", "[New RPG] {} boarded ferry {} bound for map {}", bot->GetName(),
-              data.transportEntry, data.landPos.GetMapId());
     return true;
 }
 

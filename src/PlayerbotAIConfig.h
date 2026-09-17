@@ -489,10 +489,9 @@ public:
     // outrun), instead of stopping to fight; disabled below this health %
     bool smartTravelRunPastEnemies;
     uint32 smartTravelCombatMinHealth;
-    // on the goal's own map, only walk the final stretch on the navmesh when it is within this
-    // many yards and actually navmesh-connected; farther / unreachable => teleport fallback, so
-    // a bot on a detached landmass (e.g. Bloodmyst Isle) does not swim across the ocean floor
-    float smartTravelMaxWalkDist;
+    // a bot only hops the rest of the way when it already stands at the closest point it can walk
+    // to and the goal is within this many yards of it (a door up a wall, a ledge off the navmesh)
+    float smartTravelTeleportNearDist;
     // reject taxi routes longer than this many hops; long cross-world BFS relays run into gappy
     // DBC taxi data and can strand the bot mid-flight with a dead spline
     uint32 smartTravelMaxTaxiHops;

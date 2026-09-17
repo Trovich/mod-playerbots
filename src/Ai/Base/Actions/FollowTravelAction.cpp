@@ -13,6 +13,8 @@
 #include "DBCStores.h"
 #include "Event.h"
 #include "Group.h"
+#include "GridDefines.h"
+#include "GridTerrainData.h"
 #include "LastMovementValue.h"
 #include "LfgTravelToDungeonAction.h"
 #include "Map.h"
@@ -25,7 +27,6 @@
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
 #include "Position.h"
-#include "Random.h"
 #include "SharedDefines.h"
 #include "Timer.h"
 #include "Transport.h"
@@ -33,18 +34,37 @@
 
 namespace
 {
-    constexpr uint32 GIVE_UP_MS = 300 * 1000;      // per-plan safety budget, refreshed on each (re)plan
-    constexpr uint32 LEG_STUCK_MS = 25 * 1000;     // no progress on a single leg for this long => abort
-    constexpr uint32 TAXI_FAIL_COOLDOWN_MS = 60 * 1000;  // pause smart travel after repeated taxi failures
+    constexpr uint32 GIVE_UP_MS = 300 * 1000;      // no progress at all for this long => abandon the plan
+    constexpr uint32 LEG_STUCK_MS = 25 * 1000;     // no progress on a single leg for this long => the leg stalled
+    constexpr uint32 TAXI_FAIL_COOLDOWN_MS = 60 * 1000;  // pause smart travel after a give-up
+    constexpr uint32 PENDING_MAX_MS = 60 * 1000;   // wait this long for the human we follow to finish loading
     constexpr uint32 MAX_SWIM_MS = 20 * 1000;  // longer than any legitimate crossing on a travel leg
+    constexpr uint32 STEP_SEARCH_RETRY_MS = 2000;  // a failed stepping-stone search is not repeated sooner
+    constexpr uint8 MAX_LEG_FAILS = 2;         // stalls on the way to a travel point before hopping to it
+    constexpr float FLY_TO_LINK_DIS = 500.0f;  // farther than this from a portal / pier: consider flying there
+    constexpr float TAXI_WORTH_DIS = 700.0f;   // same-region trips longer than this consider a flight
+    constexpr float FLIGHT_MAX_WALK = 1500.0f;     // walk at most this far to a flight master
+    constexpr float FLIGHT_OVERHEAD_DIS = 300.0f;  // take-off, landing and detours: a flight must beat walking by this
+    constexpr float REPLAN_MOVE_DIS = 400.0f;      // the goal moved this far (or 30% of the way) => plan again
+    constexpr float REPLAN_OTHER_MAP_DIS = 1500.0f;  // ...or this far while it is still on another map
     constexpr float DOCK_ARRIVE_DIS = 25.0f;   // "standing at the dock", and "close enough to step off"
     constexpr float DOCK_BOARD_DIS = 80.0f;    // bot-to-hull distance that counts as "berthed here"
-    constexpr float DOCK_LEAVE_DIS = 120.0f;   // bot-to-dock distance that counts as "we have arrived"
+    constexpr float DOCK_LAND_DIS = 120.0f;    // on the deck this close to the destination stop = arrived
+    constexpr float DOCK_WAIT_PICK_DIS = 70.0f;  // pick a personal pier spot once this close to the dock
+    constexpr float DOCK_WAIT_SPOT_DIS = 2.5f;   // standing on that spot
     constexpr uint32 FLIGHT_PROBE_MS = 3000;       // how often to sample in-flight progress
     constexpr uint32 FLIGHT_STALL_MS = 9000;       // no in-flight progress this long => dead taxi
     constexpr float FLIGHT_PROGRESS_DIS = 5.0f;    // yards a live taxi easily covers per probe
     constexpr float PATHFINDER_DIS = 70.0f;        // switch to direct MoveTo within this range (as NewRpg)
+    constexpr float WALK_STEP_DIS = 90.0f;         // walk a route in steps this long; the core smooths each one
+    constexpr float MIN_STEP_GAIN = 8.0f;          // a stepping stone must bring the bot at least this much closer
+    constexpr float REGRESS_DIS = 250.0f;          // a guessed step leaving the bot this much farther => stalled
     constexpr float ARRIVE_DIS = 60.0f;            // "close enough" to the goal; hand back to plain follow
+    constexpr float APPROACH_SEARCH_DIS = 250.0f;  // within this, look for the closest walkable point to the goal
+    constexpr float APPROACH_AT_DIS = 8.0f;        // standing on that point
+    constexpr float HOP_MIN_GAIN = 300.0f;         // a hop to a flight master must bring the bot this much closer
+    constexpr float HOP_POINTLESS_DIS = 25.0f;     // a hop shorter than this changes nothing: give up instead
+    constexpr uint8 MAX_APPROACH_TRIES = 2;        // re-aims before giving up on a dead end
     constexpr float PORTAL_STEP_DIS = 25.0f;       // how close to the hub centre before we jump the portal
     constexpr float DUNGEON_STEP_DIS = 20.0f;      // how close to the entrance before we step inside
     constexpr float DUNGEON_TAKEOVER_DIS = 150.0f;  // take over from plain follow beyond this to the entrance
@@ -58,54 +78,72 @@ namespace
 
     bool IsHuman(Player* p) { return p && (IsRealPlayer(p) || IsSelfBot(p)); }
 
-    Player* TravelAnchor(PlayerbotAI* botAI, Player* bot)
+    uint32 RegionOf(Player* bot)
+    {
+        return TravelMgr::GetTravelRegion(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(),
+                                          bot->GetPositionZ());
+    }
+
+    // Calls `fn` for the humans a bot travels toward, in order of preference: its master, the group leader
+    // (what plain "follow" uses) and any other real player / self-bot in the group.
+    template <typename Fn>
+    Player* FirstHuman(PlayerbotAI* botAI, Player* bot, Fn fn)
     {
         Player* master = botAI->GetMaster();
-        if (IsHuman(master) && master != bot && Travelable(master))
+        if (IsHuman(master) && master != bot && fn(master))
             return master;
 
         Player* leader = botAI->GetGroupLeader();
-        if (IsHuman(leader) && leader != bot && Travelable(leader))
+        if (IsHuman(leader) && leader != bot && fn(leader))
             return leader;
 
-        // Master not reconciled yet and the leader is a bot: follow any real player /
-        // self-bot in the group.
         if (Group* group = bot->GetGroup())
             for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
             {
                 Player* m = ref->GetSource();
-                if (m && m != bot && IsHuman(m) && Travelable(m))
+                if (m && m != bot && IsHuman(m) && fn(m))
                     return m;
             }
 
         return nullptr;
     }
 
-    // Pick where this bot should travel: the LFG dungeon entrance if the group is walking to
-    // one (`toDungeon` true, `dungeonInside` = instance-side start), otherwise the travel
-    // anchor's position. Returns false when there is nothing valid to travel to.
-    //
-    // Requires a human anchor either way. Fully bot-led LFG groups are driven by
-    // LfgTravelToDungeonAction instead - that trigger bails when an anchor exists, so the two
-    // never fight over the shared FollowTravelState.
-    bool ResolveTravelGoal(PlayerbotAI* botAI, Player* bot, WorldPosition& goal, WorldPosition& dungeonInside,
-                           bool& toDungeon)
+    Player* TravelAnchor(PlayerbotAI* botAI, Player* bot)
     {
-        Player* anchor = TravelAnchor(botAI, bot);
-        if (!anchor)
-            return false;
+        return FirstHuman(botAI, bot, [](Player* p) { return Travelable(p); });
+    }
 
+    enum class GoalStatus : uint8
+    {
+        None,     // nothing to travel toward
+        Pending,  // the human we follow is loading into a new place: keep the trip, re-aim once they land
+        Ready
+    };
+
+    // Pick where this bot should travel. The group's LFG dungeon comes first and needs nobody to follow: a bot
+    // that loses its master on the way (teleported off, zoned into some other instance) carries on to the dungeon
+    // the group is queued for. Otherwise the travel anchor's position.
+    GoalStatus ResolveTravelGoal(PlayerbotAI* botAI, Player* bot, WorldPosition& goal, WorldPosition& dungeonInside,
+                                 bool& toDungeon)
+    {
         WorldPosition outside;
         if (LfgWalkToDungeonTarget(bot, outside, dungeonInside))
         {
             goal = outside;
             toDungeon = true;
-            return true;
+            return GoalStatus::Ready;
         }
 
-        goal = WorldPosition(anchor);
         toDungeon = false;
-        return true;
+        if (Player* anchor = TravelAnchor(botAI, bot))
+        {
+            goal = WorldPosition(anchor);
+            return GoalStatus::Ready;
+        }
+
+        bool const loading =
+            FirstHuman(botAI, bot, [](Player* p) { return p->IsBeingTeleported() || !p->IsInWorld(); });
+        return loading ? GoalStatus::Pending : GoalStatus::None;
     }
 
     // Total taxi fare for the planned node chain (consecutive directed TaxiPath costs).
@@ -122,10 +160,9 @@ namespace
         return total;
     }
 
-    // FlightPathMovementGenerator::LoadPath silently fails on a hop whose directed TaxiPath is
-    // missing or has no usable TaxiPathNode geometry, which leaves the bot flagged in-flight
-    // with a dead spline (it "hangs on the taxi" then drops to the ground). Reject such chains
-    // before activating so the planner falls back to a portal hop / walk / teleport instead.
+    // FlightPathMovementGenerator::LoadPath silently fails on a hop whose directed TaxiPath is missing or has no
+    // usable TaxiPathNode geometry, which leaves the bot flagged in-flight with a dead spline. The faction taxi
+    // graph never offers such a hop; this re-checks the exact path ids the core will look up.
     bool TaxiChainFlyable(std::vector<uint32> const& nodes)
     {
         if (nodes.size() < 2)
@@ -145,9 +182,8 @@ namespace
         return true;
     }
 
-    // The transport we mean to ride, if it is currently on the bot's map. A cross-continent
-    // ferry lives in exactly one map's container at a time, so a null result usually just means
-    // it is still on the far side of its loop.
+    // The transport we mean to ride, if it is currently on the bot's map. A cross-continent ferry lives in exactly
+    // one map's container at a time, so a null result usually just means it is still on the far side of its loop.
     Transport* FindTransport(Player* bot, uint32 entry)
     {
         Map* map = bot->GetMap();
@@ -161,22 +197,199 @@ namespace
         return nullptr;
     }
 
-    // True only if `dest` (assumed on the bot's current map) is reachable over the navmesh
-    // rather than via a straight-line shortcut through terrain / open water. Long partial
-    // paths (PATHFIND_INCOMPLETE) still count - TravelFarTo chains those.
-    bool SameMapReachable(Player* bot, WorldPosition const& dest)
+    // A path the bot can really walk: built on the navmesh, not a straight-line fallback (tile not loaded, end off
+    // the mesh, or longer than the point buffer) and not an error.
+    bool PathWalkable(PathGenerator const& path)
     {
-        PathGenerator probe(bot);
-        probe.CalculatePath(dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
-
-        // NOPATH / SHORTCUT / NOT_USING_PATH == "no navmesh route, straight line only" - that is
-        // the under-terrain beeline we must not do. A far-from-poly endpoint on an otherwise
-        // real path is fine (MoveTo snaps it).
-        uint32 const t = probe.GetPathType();
-        if (t & (PATHFIND_NOPATH | PATHFIND_SHORTCUT | PATHFIND_NOT_USING_PATH))
+        PathType const type = path.GetPathType();
+        if (type == PATHFIND_BLANK || (type & (PATHFIND_NOPATH | PATHFIND_NOT_USING_PATH | PATHFIND_SHORTCUT |
+                                               PATHFIND_SHORT)))
             return false;
 
-        return (t & (PATHFIND_NORMAL | PATHFIND_INCOMPLETE)) != 0;
+        return path.GetPath().size() >= 2;
+    }
+
+    // Corner-to-corner paths: a route of many hundred yards fits the point buffer (a smoothed one is cut to a
+    // straight line past ~600 yards), and it is only used to pick a waypoint - the core smooths the walk to it.
+    void CalculateRoute(PathGenerator& path, float x, float y, float z)
+    {
+        path.SetUseStraightPath(true);
+        path.CalculatePath(x, y, z);
+    }
+
+    float PathLength(Movement::PointsArray const& points)
+    {
+        float len = 0.0f;
+        for (size_t i = 1; i < points.size(); ++i)
+            len += (points[i] - points[i - 1]).length();
+        return len;
+    }
+
+    // The point `dist` yards along the path (or its last point).
+    G3D::Vector3 PointAlong(Movement::PointsArray const& points, float dist)
+    {
+        for (size_t i = 1; i < points.size(); ++i)
+        {
+            float const seg = (points[i] - points[i - 1]).length();
+            if (seg >= dist && seg > 0.0f)
+                return points[i - 1] + (points[i] - points[i - 1]) * (dist / seg);
+
+            dist -= seg;
+        }
+        return points.back();
+    }
+
+    // The next waypoint toward `dest`, at most WALK_STEP_DIS along a real navmesh route.
+    //
+    // 1. A route to the destination itself. A complete one is trusted even where it first leads away (round a wall,
+    //    down to a gate); a partial one only when it ends nearer, or is a long prefix of a longer route.
+    // 2. Otherwise - the destination's tile is not loaded yet, or it sits off the mesh - aim at points toward it
+    //    inside the loaded area and take the route that ends nearest the destination, detours penalised. The old
+    //    random cone sampler happily walked bots out of the back gate of a keep and away from the goal.
+    bool NextRouteStep(Player* bot, WorldPosition const& dest, WorldPosition& out, bool& onRoute)
+    {
+        float const distToDest = bot->GetExactDist(dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
+
+        {
+            PathGenerator path(bot);
+            CalculateRoute(path, dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
+            if (PathWalkable(path))
+            {
+                Movement::PointsArray const& points = path.GetPath();
+                G3D::Vector3 const& end = path.GetActualEndPosition();
+                bool const complete = !(path.GetPathType() & PATHFIND_INCOMPLETE);
+                float const endGap = dest.GetExactDist(end.x, end.y, end.z);
+                float const length = PathLength(points);
+
+                if (complete || endGap + MIN_STEP_GAIN < distToDest || length >= 2.0f * WALK_STEP_DIS)
+                {
+                    G3D::Vector3 const step = PointAlong(points, WALK_STEP_DIS);
+                    out = WorldPosition(bot->GetMapId(), step.x, step.y, step.z);
+                    onRoute = complete;
+                    return true;
+                }
+            }
+        }
+
+        Map* map = bot->GetMap();
+        if (!map)
+            return false;
+
+        static float const RADII[] = { 120.0f, 70.0f, 35.0f };
+        static float const OFFSETS[] = { 0.0f, 0.44f, -0.44f, 0.87f, -0.87f, 1.4f, -1.4f, 2.0f, -2.0f };  // radians
+
+        float const bx = bot->GetPositionX();
+        float const by = bot->GetPositionY();
+        float const bz = bot->GetPositionZ();
+        float const base = bot->GetAngle(dest.GetPositionX(), dest.GetPositionY());
+        uint32 const phase = bot->GetPhaseMask();
+
+        bool found = false;
+        float bestScore = distToDest - MIN_STEP_GAIN;
+        for (float const radius : RADII)
+        {
+            for (float const offset : OFFSETS)
+            {
+                float const cx = bx + std::cos(base + offset) * radius;
+                float const cy = by + std::sin(base + offset) * radius;
+                if (!Acore::IsValidMapCoord(cx, cy))
+                    continue;
+
+                float const cz = map->GetHeight(phase, cx, cy, bz + radius * 0.6f + 10.0f, true, radius * 1.2f + 30.0f);
+                if (cz <= INVALID_HEIGHT)
+                    continue;
+
+                PathGenerator path(bot);
+                CalculateRoute(path, cx, cy, cz);
+                if (!PathWalkable(path))
+                    continue;
+
+                Movement::PointsArray const& points = path.GetPath();
+                G3D::Vector3 const& end = path.GetActualEndPosition();
+                float const straight = bot->GetExactDist(end.x, end.y, end.z);
+                float const detour = std::max(0.0f, PathLength(points) - straight);
+                float const score = dest.GetExactDist(end.x, end.y, end.z) + 0.25f * detour;
+                if (score >= bestScore)
+                    continue;
+
+                G3D::Vector3 const step = PointAlong(points, WALK_STEP_DIS);
+                bestScore = score;
+                found = true;
+                out = WorldPosition(bot->GetMapId(), step.x, step.y, step.z);
+            }
+
+            // The widest ring that gains anything is the one to take; smaller rings only matter when it does not.
+            if (found)
+                break;
+        }
+
+        onRoute = false;
+        return found;
+    }
+
+    // The closest point to `goal` the bot can really walk to from where it stands: the end of the path toward the
+    // goal itself, or toward ground samples around it (a door up a wall, a ledge off the navmesh). Straight-line
+    // shortcuts and unloaded tiles do not count. False when nothing near the goal is reachable.
+    bool FindApproachPoint(Player* bot, WorldPosition const& goal, WorldPosition& out)
+    {
+        Map* map = bot->GetMap();
+        if (!map)
+            return false;
+
+        bool found = false;
+        float best = FLT_MAX;
+        auto consider = [&](float x, float y, float z)
+        {
+            PathGenerator path(bot);
+            path.CalculatePath(x, y, z);
+            if (!PathWalkable(path))
+                return;
+
+            G3D::Vector3 const& end = path.GetActualEndPosition();
+            float const d = goal.GetExactDist(end.x, end.y, end.z);
+            if (d >= best)
+                return;
+
+            best = d;
+            found = true;
+            out = WorldPosition(bot->GetMapId(), end.x, end.y, end.z, 0.0f);
+        };
+
+        consider(goal.GetPositionX(), goal.GetPositionY(), goal.GetPositionZ());
+
+        uint32 const phase = bot->GetPhaseMask();
+        for (float r = 10.0f; r <= 60.0f; r += 10.0f)
+            for (uint8 a = 0; a < 8; ++a)
+            {
+                float const ang = static_cast<float>(a) * static_cast<float>(M_PI) / 4.0f;
+                float const x = goal.GetPositionX() + std::cos(ang) * r;
+                float const y = goal.GetPositionY() + std::sin(ang) * r;
+                float const z = map->GetHeight(phase, x, y, goal.GetPositionZ() + 10.0f, true, 100.0f);
+                if (z <= INVALID_HEIGHT)
+                    continue;
+
+                consider(x, y, z);
+            }
+
+        return found;
+    }
+
+    // Has the goal moved enough that the trip in progress no longer leads to it?
+    bool GoalMoved(Player* bot, FollowTravelState const& st, WorldPosition const& goal, bool toDungeon)
+    {
+        if (!st.planGoal)
+            return false;
+
+        if (st.goalIsDungeon != toDungeon || st.planGoal.GetMapId() != goal.GetMapId() ||
+            TravelMgr::GetTravelRegion(st.planGoal) != TravelMgr::GetTravelRegion(goal))
+            return true;
+
+        float const moved = st.planGoal.GetExactDist2d(goal.GetPositionX(), goal.GetPositionY());
+        if (bot->GetMapId() != goal.GetMapId())
+            return moved > REPLAN_OTHER_MAP_DIS;
+
+        float const botToGoal = bot->GetExactDist2d(goal.GetPositionX(), goal.GetPositionY());
+        return moved > std::max(REPLAN_MOVE_DIS, 0.3f * botToGoal);
     }
 
     constexpr float AVOID_BAND = 16.0f;       // hostile this close to the path line is "in the way"
@@ -184,10 +397,9 @@ namespace
     constexpr float AVOID_SHIFT = 20.0f;      // sidestep this far to the clear side
     constexpr float AVOID_STEP = 24.0f;       // shortened forward step while dodging
 
-    // If an idle hostile NPC sits right on the bot -> (tx,ty) line just ahead, return a
-    // waypoint sidestepped to the clearer side (PathGenerator-validated), so the bot rounds
-    // the pack instead of running through it. Returns the input unchanged when nothing blocks
-    // or no safe detour exists.
+    // If an idle hostile NPC sits right on the bot -> (tx,ty) line just ahead, return a waypoint sidestepped to the
+    // clearer side (PathGenerator-validated), so the bot rounds the pack instead of running through it. Returns the
+    // input unchanged when nothing blocks or no safe detour exists.
     WorldPosition AvoidHostiles(PlayerbotAI* botAI, Player* bot, float tx, float ty, float tz)
     {
         WorldPosition original(bot->GetMapId(), tx, ty, tz);
@@ -239,7 +451,7 @@ namespace
 
         PathGenerator gen(bot);
         gen.CalculatePath(nx, ny, tz);
-        if (gen.GetPathType() & ~(PATHFIND_NORMAL | PATHFIND_INCOMPLETE))
+        if (!PathWalkable(gen) || (gen.GetPathType() & ~(PATHFIND_NORMAL | PATHFIND_INCOMPLETE)))
             return original;  // detour not walkable - keep the straight line
 
         G3D::Vector3 const& end = gen.GetActualEndPosition();
@@ -247,7 +459,11 @@ namespace
     }
 }
 
-Player* FollowTravelAnchor(PlayerbotAI* botAI, Player* bot) { return TravelAnchor(botAI, bot); }
+bool FollowTravelCovers(PlayerbotAI* botAI)
+{
+    return sPlayerbotAIConfig.groupSmartTravel && botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT) &&
+           !botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT);
+}
 
 // While a trip is in progress, decide whether the bot should keep running through combat it
 // picked up in transit (trash leashes once outrun) rather than stop and fight.
@@ -283,14 +499,7 @@ bool TravelRunsThroughCombat(PlayerbotAI* botAI, Player* bot)
 
 bool FollowTravelTrigger::IsActive()
 {
-    if (!sPlayerbotAIConfig.groupSmartTravel)
-        return false;
-
-    if (!botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT))
-        return false;
-
-    // Respect an explicit "stay" - the bot was told to hold position, not chase the master.
-    if (botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT))
+    if (!FollowTravelCovers(botAI))
         return false;
 
     bool const inCombat = botAI->GetState() == BOT_STATE_COMBAT || bot->IsInCombat();
@@ -331,7 +540,7 @@ bool FollowTravelTrigger::IsActive()
     WorldPosition goal;
     WorldPosition dungeonInside;
     bool toDungeon = false;
-    if (!ResolveTravelGoal(botAI, bot, goal, dungeonInside, toDungeon))
+    if (ResolveTravelGoal(botAI, bot, goal, dungeonInside, toDungeon) != GoalStatus::Ready)
         return false;
 
     if (toDungeon)
@@ -347,27 +556,9 @@ bool FollowTravelTrigger::IsActive()
     bool const sameMap = bot->GetMapId() == goal.GetMapId();
     float const dist2d = sameMap ? bot->GetExactDist2d(goal.GetPositionX(), goal.GetPositionY()) : FLT_MAX;
 
-    bool const farEnough = !sameMap || dist2d > sPlayerbotAIConfig.groupSmartTravelMinDist;
-    if (!farEnough)
-        return false;
-
-    if (!sTravelMgr.GetFlightPathToward(bot, goal).empty())
-        return true;
-
-    TravelMgr::PortalHop hop;
-    if (sTravelMgr.FindPortalHop(bot, goal, hop, false))
-        return true;
-
-    if (!sameMap)
-    {
-        WorldPosition hub;
-        return sTravelMgr.GetPortalHubStaging(bot, goal, hub) &&
-               !sTravelMgr.GetFlightPathToward(bot, hub).empty();
-    }
-
-    // Same map, no flight route, but past the min distance: plain follow would beeline this in
-    // a straight line through terrain. Take over and walk it on the navmesh instead.
-    return true;
+    // Past the follow distance the planner always has a move: fly, follow the portal / taxi / ferry chain to the
+    // goal's region, or walk. Handing this to plain follow would beeline straight through terrain and water.
+    return !sameMap || dist2d > sPlayerbotAIConfig.groupSmartTravelMinDist;
 }
 
 bool FollowTravelAction::isUseful()
@@ -392,12 +583,14 @@ bool FollowTravelAction::isUseful()
     WorldPosition goal;
     WorldPosition dungeonInside;
     bool toDungeon = false;
-    return ResolveTravelGoal(botAI, bot, goal, dungeonInside, toDungeon);
+    GoalStatus const status = ResolveTravelGoal(botAI, bot, goal, dungeonInside, toDungeon);
+    return status == GoalStatus::Ready || (status == GoalStatus::Pending && st.phase != FollowTravelPhase::None);
 }
 
 bool FollowTravelAction::Execute(Event /*event*/)
 {
     FollowTravelState& st = AI_VALUE(FollowTravelState&, "follow travel state");
+    uint32 const nowMs = getMSTime();
 
     // Riding a taxi: wait it out and let StepTravel's InFlight watchdog rescue a dead flight.
     // Deliberately before goal resolution - the goal can stop resolving mid-flight (the master
@@ -426,36 +619,44 @@ bool FollowTravelAction::Execute(Event /*event*/)
     WorldPosition goal;
     WorldPosition dungeonInside;
     bool toDungeon = false;
-    if (!ResolveTravelGoal(botAI, bot, goal, dungeonInside, toDungeon))
+    GoalStatus const status = ResolveTravelGoal(botAI, bot, goal, dungeonInside, toDungeon);
+
+    if (status == GoalStatus::Pending)
+    {
+        // Keep the plan while they load; drop it if they never reappear.
+        if (!st.pendingSinceMs)
+            st.pendingSinceMs = nowMs;
+
+        if (nowMs - st.pendingSinceMs < PENDING_MAX_MS)
+            return true;
+    }
+
+    if (status != GoalStatus::Ready)
     {
         st.Clear();
         return false;
     }
 
-    if (toDungeon)
+    st.pendingSinceMs = 0;
+
+    if (toDungeon && bot->GetMapId() == goal.GetMapId() &&
+        bot->GetExactDist2d(goal.GetPositionX(), goal.GetPositionY()) < DUNGEON_STEP_DIS)
     {
-        bool const sameMap = bot->GetMapId() == goal.GetMapId();
-        float const d = sameMap ? bot->GetExactDist2d(goal.GetPositionX(), goal.GetPositionY()) : FLT_MAX;
+        // On the portal - step inside, the same short hop clicking it performs.
+        bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
+        bot->TeleportTo(dungeonInside.GetMapId(), dungeonInside.GetPositionX(), dungeonInside.GetPositionY(),
+                        dungeonInside.GetPositionZ(), dungeonInside.GetOrientation());
+        st.Clear();
+        return true;
+    }
 
-        if (sameMap && d < DUNGEON_STEP_DIS)
-        {
-            // On the portal - step inside, the same short hop clicking it performs.
-            bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
-            bot->TeleportTo(dungeonInside.GetMapId(), dungeonInside.GetPositionX(), dungeonInside.GetPositionY(),
-                            dungeonInside.GetPositionZ(), dungeonInside.GetOrientation());
-            st.Clear();
-            return true;
-        }
-
-        if (sameMap && d < DUNGEON_TAKEOVER_DIS)
-        {
-            // Final approach on the same map - just walk in on the navmesh. Drop any leftover
-            // trip state first: this branch is stateless and re-selected by the trigger every
-            // tick, and a non-None phase would keep plain "follow" disabled if we got stuck.
-            st.Clear();
-            return MoveTo(goal.GetMapId(), goal.GetPositionX(), goal.GetPositionY(), goal.GetPositionZ(), false, false,
-                          false, true);
-        }
+    // The goal went somewhere else (the master teleported, the group was queued meanwhile): the leg in progress
+    // leads to the old place, so plan again from here.
+    if (st.phase != FollowTravelPhase::None && GoalMoved(bot, st, goal, toDungeon))
+    {
+        LOG_DEBUG("playerbots", "[FollowTravel] {}: goal moved to map {} ({:.0f},{:.0f}) - re-planning",
+                  bot->GetName(), goal.GetMapId(), goal.GetPositionX(), goal.GetPositionY());
+        st.phase = FollowTravelPhase::None;
     }
 
     st.goalIsDungeon = toDungeon;
@@ -476,7 +677,6 @@ bool FollowTravelAction::Execute(Event /*event*/)
 
     // Keep the bot mounted for the road legs. The normal mount check only mirrors a nearby
     // master; CheckMountStateAction's separated-from-master path lets it self-mount here.
-    uint32 const nowMs = getMSTime();
     if (!bot->IsMounted() && !bot->IsInFlight() && !bot->IsInCombat() && !bot->GetTransport() &&
         st.phase != FollowTravelPhase::InFlight && st.phase != FollowTravelPhase::Aboard &&
         nowMs >= st.nextMountPokeMs)
@@ -494,6 +694,147 @@ bool FollowTravelAction::Execute(Event /*event*/)
     return true;
 }
 
+bool FollowTravelAction::PlanFlight(FollowTravelState& st, WorldPosition const& target, float directDist)
+{
+    TravelMgr::FlightPlan plan;
+    if (!sTravelMgr.PlanFlightToward(bot, target, FLIGHT_MAX_WALK, plan))
+        return false;
+
+    // Only worth it when walking to the flight master and on from the landing beats walking there outright.
+    if (plan.walkDist + plan.landDist + FLIGHT_OVERHEAD_DIS >= directDist)
+        return false;
+
+    if (!TaxiChainFlyable(plan.nodes))
+    {
+        LOG_DEBUG("playerbots", "[FollowTravel] {}: rejecting {}-node taxi chain with a DBC gap", bot->GetName(),
+                  plan.nodes.size());
+        return false;
+    }
+
+    st.flightMasterEntry = plan.flightMaster->templateEntry;
+    st.flightMasterPos = plan.flightMaster->pos;
+    st.taxiNodes = std::move(plan.nodes);
+    st.taxiArrival = plan.arrival;
+    st.taxiTakeoffAtMs = 0;
+    st.flightStallSinceMs = 0;
+    st.phase = FollowTravelPhase::ToFlightMaster;
+    st.ResetLeg(st.flightMasterPos);
+    LOG_DEBUG("playerbots",
+              "[FollowTravel] {}: fly ({} hops) toward map {} ({:.0f},{:.0f}) - walk {:.0f}y, land {:.0f}y short",
+              bot->GetName(), st.taxiNodes.size() - 1, target.GetMapId(), target.GetPositionX(),
+              target.GetPositionY(), plan.walkDist, plan.landDist);
+    return true;
+}
+
+bool FollowTravelAction::PlanLink(FollowTravelState& st, TravelMgr::TravelEdge const& edge)
+{
+    float const toStaging = bot->GetExactDist2d(edge.staging.GetPositionX(), edge.staging.GetPositionY());
+
+    switch (edge.kind)
+    {
+        case TravelMgr::TravelEdge::Kind::Taxi:
+        {
+            // A flight from any flight master nearby straight across the seam; else walk to the one the link
+            // starts at and fly the link itself.
+            if (PlanFlight(st, edge.dest, FLT_MAX))
+                return true;
+
+            TravelMgr::FlightMasterInfo const* fm = sTravelMgr.GetFlightMasterForNode(edge.taxiFrom, bot->GetTeamId());
+            std::vector<uint32> nodes = sTravelMgr.GetFactionTaxiRoute(edge.taxiFrom, edge.taxiTo, bot->GetTeamId());
+            if (!fm || nodes.size() < 2 || !TaxiChainFlyable(nodes))
+                return false;
+
+            st.flightMasterEntry = fm->templateEntry;
+            st.flightMasterPos = fm->pos;
+            st.taxiNodes = std::move(nodes);
+            st.taxiArrival = edge.dest;
+            st.taxiTakeoffAtMs = 0;
+            st.flightStallSinceMs = 0;
+            st.phase = FollowTravelPhase::ToFlightMaster;
+            st.ResetLeg(st.flightMasterPos);
+            LOG_DEBUG("playerbots", "[FollowTravel] {}: walking to flight master for region link {} -> {}",
+                      bot->GetName(), edge.fromRegion, edge.toRegion);
+            return true;
+        }
+        case TravelMgr::TravelEdge::Kind::Portal:
+        {
+            if (toStaging > FLY_TO_LINK_DIS && PlanFlight(st, edge.staging, toStaging))
+                return true;
+
+            st.portalStaging = edge.staging;
+            st.portalDestMap = edge.dest.GetMapId();
+            st.portalDestPos = edge.dest;
+            st.phase = FollowTravelPhase::ToPortal;
+            st.ResetLeg(st.portalStaging);
+            LOG_DEBUG("playerbots", "[FollowTravel] {}: portal link {} -> {} at ({:.0f},{:.0f}), {:.0f}y away",
+                      bot->GetName(), edge.fromRegion, edge.toRegion, edge.staging.GetPositionX(),
+                      edge.staging.GetPositionY(), toStaging);
+            return true;
+        }
+        case TravelMgr::TravelEdge::Kind::Ferry:
+        {
+            if (toStaging > FLY_TO_LINK_DIS && PlanFlight(st, edge.staging, toStaging))
+                return true;
+
+            st.transportEntry = edge.transportEntry;
+            st.waitPos = WorldPosition();
+            st.waitPosTried = false;
+            st.dockPos = edge.staging;
+            st.landPos = edge.dest;
+            st.dockWaitSinceMs = 0;
+            st.phase = FollowTravelPhase::ToDock;
+            st.ResetLeg(st.dockPos);
+            LOG_DEBUG("playerbots", "[FollowTravel] {}: ferry {} link {} -> {}, dock {:.0f}y away", bot->GetName(),
+                      edge.transportEntry, edge.fromRegion, edge.toRegion, toStaging);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool FollowTravelAction::HopTo(FollowTravelState& st, WorldPosition const& where, char const* why)
+{
+    if (!where || !sPlayerbotAIConfig.smartTravelTeleportFallback || bot->IsInCombat())
+    {
+        LOG_DEBUG("playerbots", "[FollowTravel] {}: {} - no hop allowed, giving up", bot->GetName(), why);
+        return false;
+    }
+
+    LOG_DEBUG("playerbots", "[FollowTravel] {}: {} - hopping to travel point on map {} ({:.0f},{:.0f},{:.0f})",
+              bot->GetName(), why, where.GetMapId(), where.GetPositionX(), where.GetPositionY(),
+              where.GetPositionZ());
+
+    bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
+    bot->TeleportTo(where.GetMapId(), where.GetPositionX(), where.GetPositionY(), where.GetPositionZ(),
+                    bot->GetOrientation());
+    st.phase = FollowTravelPhase::None;
+    return true;
+}
+
+bool FollowTravelAction::LegStalled(FollowTravelState& st, WorldPosition const& travelPoint, char const* what)
+{
+    if (++st.legFails < MAX_LEG_FAILS)
+    {
+        LOG_DEBUG("playerbots", "[FollowTravel] {}: stalled on the way to the {} - retrying", bot->GetName(), what);
+        st.ResetLeg(st.moveFarPos);
+        return true;
+    }
+
+    st.legFails = 0;
+
+    // Standing next to it already: hopping would only repeat the leg that just failed.
+    if (bot->GetMapId() == travelPoint.GetMapId() &&
+        bot->GetExactDist2d(travelPoint.GetPositionX(), travelPoint.GetPositionY()) < HOP_POINTLESS_DIS)
+    {
+        LOG_DEBUG("playerbots", "[FollowTravel] {}: stalled right at the {} - giving up", bot->GetName(), what);
+        return false;
+    }
+
+    std::string const why = std::string("cannot walk to the ") + what;
+    return HopTo(st, travelPoint, why.c_str());
+}
+
 bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& goal)
 {
     uint32 const now = getMSTime();
@@ -501,8 +842,14 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
 
     if (st.phase == FollowTravelPhase::None)
     {
+        // Clear() wipes the dungeon flags the caller just set; carry them over.
+        bool const goalIsDungeon = st.goalIsDungeon;
+        WorldPosition const dungeonInside = st.dungeonInside;
         st.Clear();
         st.goal = goal;
+        st.planGoal = goal;
+        st.goalIsDungeon = goalIsDungeon;
+        st.dungeonInside = dungeonInside;
         st.giveUpAtMs = now + GIVE_UP_MS;
 
         if (bot->IsInFlight())
@@ -511,149 +858,53 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
             return true;
         }
 
-        if (bot->GetMapId() == goal.GetMapId() &&
-            bot->GetExactDist2d(goal.GetPositionX(), goal.GetPositionY()) < ARRIVE_DIS)
+        uint32 const botRegion = RegionOf(bot);
+        uint32 const goalRegion = TravelMgr::GetTravelRegion(goal);
+        bool const sameRegion = bot->GetMapId() == goal.GetMapId() && botRegion == goalRegion;
+        float const dist = sameRegion ? bot->GetExactDist2d(goal.GetPositionX(), goal.GetPositionY()) : FLT_MAX;
+
+        if (sameRegion && dist < (st.goalIsDungeon ? DUNGEON_STEP_DIS : ARRIVE_DIS))
             return false;
 
-        // Standing at a portal that gets us closer to the goal: jump it. Also covers same-map
-        // links with no walkable route, such as Darnassus <-> Rut'theran Village.
-        TravelMgr::PortalHop hop;
-        if (sTravelMgr.FindPortalHop(bot, goal, hop))
+        if (sameRegion)
         {
-            st.portalStaging = hop.staging;
-            st.portalDestMap = hop.destMap;
-            st.portalDestPos = hop.destPos;
-            st.phase = FollowTravelPhase::ToPortal;
-            st.ResetLeg(st.portalStaging);
-            return true;
-        }
-
-        // Otherwise fly toward the goal if there is a taxi route for it; if the goal is on
-        // another continent with no direct taxi route, fly to a portal hub (Dalaran) first -
-        // FindPortalHop then takes over once we land.
-        WorldPosition arrival;
-        std::vector<uint32> nodes = sTravelMgr.GetFlightPathToward(bot, goal, &arrival);
-        if (nodes.size() < 2)
-        {
-            WorldPosition hub;
-            if (sTravelMgr.GetPortalHubStaging(bot, goal, hub))
-                nodes = sTravelMgr.GetFlightPathToward(bot, hub, &arrival);
-        }
-        // A ferry that bridges the two maps: usable either as a flight destination (fly to the
-        // harbour first) or, once we are near enough, as a leg of its own. Resolved before the
-        // flyable check below so a harbour-bound taxi chain is validated like any other.
-        TravelMgr::TransportLeg ferry;
-        bool const hasFerry = sPlayerbotAIConfig.smartTravelUseTransports && bot->GetMapId() != goal.GetMapId() &&
-                              sTravelMgr.FindTransportLeg(bot, goal, ferry);
-
-        if (nodes.size() < 2 && hasFerry)
-            nodes = sTravelMgr.GetFlightPathToward(bot, ferry.board.pos, &arrival);
-
-        // Only commit to a flight if the chain is short enough and every hop has usable taxi
-        // geometry - a long or gappy BFS relay strands the bot mid-flight (see TaxiChainFlyable).
-        bool const flyable = nodes.size() >= 2 &&
-                             (nodes.size() - 1) <= sPlayerbotAIConfig.smartTravelMaxTaxiHops &&
-                             TaxiChainFlyable(nodes);
-
-        if (nodes.size() >= 2 && !flyable)
-            LOG_DEBUG("playerbots", "[FollowTravel] {}: rejecting {}-hop taxi chain (too long or gappy)",
-                      bot->GetName(), nodes.size());
-
-        if (flyable)
-        {
-            if (TravelMgr::FlightMasterInfo const* fm = sTravelMgr.GetNearestFlightMasterInfo(bot))
-            {
-                st.flightMasterEntry = fm->templateEntry;
-                st.flightMasterPos = fm->pos;
-                st.taxiNodes = std::move(nodes);
-                st.taxiArrival = arrival;
-                st.taxiTakeoffAtMs = 0;
-                st.flightStallSinceMs = 0;
-                st.phase = FollowTravelPhase::ToFlightMaster;
-                st.ResetLeg(st.flightMasterPos);
-                LOG_DEBUG("playerbots", "[FollowTravel] {}: fly ({} hops) toward map {} ({:.0f},{:.0f})",
-                          bot->GetName(), st.taxiNodes.size(), goal.GetMapId(), goal.GetPositionX(),
-                          goal.GetPositionY());
+            // 1. A long way across the same land: fly when a flight really shortens the trip.
+            if (dist > TAXI_WORTH_DIS && PlanFlight(st, goal, dist))
                 return true;
-            }
-        }
 
-        // No flight route. If a portal on this map leads closer to the goal and we can walk to
-        // it, go there on foot: that is the only way out of places like Darnassus, whose sole
-        // exit is the Rut'theran portal with the flight master on the far side of it.
-        {
-            TravelMgr::PortalHop walkHop;
-            if (sTravelMgr.FindPortalHop(bot, goal, walkHop, false) && SameMapReachable(bot, walkHop.staging))
-            {
-                st.portalStaging = walkHop.staging;
-                st.portalDestMap = walkHop.destMap;
-                st.portalDestPos = walkHop.destPos;
-                st.phase = FollowTravelPhase::ToPortal;
-                st.ResetLeg(st.portalStaging);
-                LOG_DEBUG("playerbots", "[FollowTravel] {}: walking to portal on map {} ({:.0f},{:.0f})",
-                          bot->GetName(), walkHop.staging.GetMapId(), walkHop.staging.GetPositionX(),
-                          walkHop.staging.GetPositionY());
-                return true;
-            }
-        }
-
-        // Still here: no flight and no portal to the goal's continent. If a ferry bridges the
-        // two maps and its harbour is walkable from here, go wait for it.
-        if (hasFerry && SameMapReachable(bot, ferry.board.pos))
-        {
-            st.transportEntry = ferry.entry;
-            st.dockPos = ferry.board.pos;
-            st.landPos = ferry.land.pos;
-            st.dockWaitSinceMs = 0;
-            st.phase = FollowTravelPhase::ToDock;
-            st.ResetLeg(st.dockPos);
-            LOG_DEBUG("playerbots", "[FollowTravel] {}: ferry {} from map {} to map {}", bot->GetName(),
-                      ferry.entry, ferry.board.mapId, ferry.land.mapId);
-            return true;
-        }
-
-        // No flight and no portal. If we are on the goal's map, close enough, and the navmesh
-        // actually connects there, walk it on real paths. Beyond the walk cap or across an
-        // unlinked landmass (Bloodmyst Isle -> Hellfire, same map 530) fall through instead of
-        // beelining across terrain / the ocean floor.
-        if (bot->GetMapId() == goal.GetMapId())
-        {
-            float const gd = bot->GetExactDist2d(goal.GetPositionX(), goal.GetPositionY());
-            if (gd <= sPlayerbotAIConfig.smartTravelMaxWalkDist && SameMapReachable(bot, goal))
-            {
-                st.phase = FollowTravelPhase::FinalApproach;
-                st.ResetLeg(goal);
-                LOG_DEBUG("playerbots", "[FollowTravel] {}: walk {:.0f}y toward goal on map {} (no flight route)",
-                          bot->GetName(), gd, goal.GetMapId());
-                return true;
-            }
-
-            LOG_DEBUG("playerbots", "[FollowTravel] {}: goal on map {} is {:.0f}y away and not walkable - fallback",
-                      bot->GetName(), goal.GetMapId(), gd);
-        }
-
-        // No road route to the goal (another map with no taxi/portal link, or a same-map spot
-        // the navmesh cannot reach). Last resort so a grouped bot is not stranded forever:
-        // teleport it to the goal. Guarded by config, off = the bot just gives up.
-        if (sPlayerbotAIConfig.smartTravelTeleportFallback && !bot->IsInCombat())
-        {
-            LOG_DEBUG("playerbots", "[FollowTravel] {}: no route to map {} - teleport fallback", bot->GetName(),
+            // 2. Walk. No distance cap: a goal the navmesh cannot reach (the Blood Furnace door hangs up the
+            //    citadel wall) is walked to the closest reachable point first, and only from there may the rest be
+            //    hopped.
+            st.phase = FollowTravelPhase::FinalApproach;
+            st.ResetLeg(goal);
+            LOG_DEBUG("playerbots", "[FollowTravel] {}: walk {:.0f}y toward goal on map {}", bot->GetName(), dist,
                       goal.GetMapId());
-            bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
-            bot->TeleportTo(goal.GetMapId(), goal.GetPositionX(), goal.GetPositionY(), goal.GetPositionZ(),
-                            bot->GetOrientation());
-        }
-        else
-        {
-            LOG_DEBUG("playerbots", "[FollowTravel] {}: no route to map {} and teleport fallback off - giving up",
-                      bot->GetName(), goal.GetMapId());
+            return true;
         }
 
-        return false;
+        // 3. Another continent, or a cut-off piece of this one: the next portal / taxi / ferry on the shortest chain
+        //    there. This walks a Darnassus bot to the Rut'theran portal, flies it on to Auberdine and ships it across.
+        TravelMgr::TravelEdge edge;
+        if (sTravelMgr.NextTravelEdge(bot, goal, edge))
+        {
+            if (PlanLink(st, edge))
+                return true;
+
+            LOG_DEBUG("playerbots", "[FollowTravel] {}: link {} -> {} cannot be used - giving up", bot->GetName(),
+                      edge.fromRegion, edge.toRegion);
+            return false;
+        }
+
+        // 4. No chain for this bot at all (a level-gated region, ferries disabled). Hop to the flight master nearest
+        //    the goal - a travel point, not the goal itself - and carry on from there.
+        LOG_DEBUG("playerbots", "[FollowTravel] {}: no route from region {} (map {} {:.0f},{:.0f}) to region {}",
+                  bot->GetName(), botRegion, bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), goalRegion);
+        TravelMgr::FlightMasterInfo const* fm = sTravelMgr.GetFlightMasterNear(goal, bot->GetTeamId());
+        return HopTo(st, fm ? fm->pos : goal, "no route to the goal's region");
     }
 
     // InFlight and the ferry phases run on their own budgets: a taxi ride or a wait at a dock
-    // is legitimately minutes long and must not trip the per-plan give-up timer.
+    // is legitimately minutes long and must not trip the no-progress timer.
     if (st.phase != FollowTravelPhase::InFlight && st.phase != FollowTravelPhase::ToDock &&
         st.phase != FollowTravelPhase::Aboard && now > st.giveUpAtMs)
         return false;
@@ -672,14 +923,15 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
                                                      st.flightMasterPos.GetPositionY(),
                                                      st.flightMasterPos.GetPositionZ());
             if (distToFm > INTERACTION_DISTANCE)
-                return TravelFarTo(st, st.flightMasterPos);
+                return TravelFarTo(st, st.flightMasterPos) || LegStalled(st, st.flightMasterPos, "flight master");
 
             Creature* flightMaster = bot->FindNearestCreature(st.flightMasterEntry, INTERACTION_DISTANCE * 3.0f);
             if (!flightMaster || !flightMaster->IsAlive())
                 return false;
 
             if (bot->GetDistance(flightMaster) > INTERACTION_DISTANCE)
-                return TravelFarTo(st, WorldPosition(flightMaster));
+                return TravelFarTo(st, WorldPosition(flightMaster)) ||
+                       LegStalled(st, WorldPosition(flightMaster), "flight master");
 
             // The flight can't be started in combat - wait it out rather than burning the
             // retry budget.
@@ -796,7 +1048,8 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
             if (!to)
                 to = WorldPosition(bot);
 
-            LOG_INFO("playerbots", "[FollowTravel] {}: taxi stalled in flight - force-landing at map {} ({:.0f},{:.0f})",
+            LOG_INFO("playerbots",
+                     "[FollowTravel] {}: taxi stalled in flight - force-landing at map {} ({:.0f},{:.0f})",
                      bot->GetName(), to.GetMapId(), to.GetPositionX(), to.GetPositionY());
             bot->TeleportTo(to.GetMapId(), to.GetPositionX(), to.GetPositionY(), to.GetPositionZ(),
                             bot->GetOrientation());
@@ -808,9 +1061,10 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
 
         case FollowTravelPhase::ToDock:
         {
-            // Already aboard (we may have walked on while it sat at the pier).
+            // Attached already (second half of the boarding hop below, or we were aboard).
             if (bot->GetTransport())
             {
+                st.deckPos = WorldPosition();
                 st.phase = FollowTravelPhase::Aboard;
                 st.dockWaitSinceMs = now;
                 return true;
@@ -822,8 +1076,69 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
                 return true;
             }
 
-            if (bot->GetExactDist2d(st.dockPos.GetPositionX(), st.dockPos.GetPositionY()) > DOCK_ARRIVE_DIS)
-                return TravelFarTo(st, st.dockPos);
+            Transport* transport = FindTransport(bot, st.transportEntry);
+
+            // Second half of boarding: we hopped onto the deck last tick. Only attach once the
+            // hop has actually been applied - AddPassenger records the offset from our current
+            // position, so attaching early glues the bot to the ship at pier coordinates and it
+            // gets dragged through the air.
+            if (st.deckPos)
+            {
+                if (bot->IsBeingTeleported())
+                    return true;
+
+                if (transport && TravelMgr::IsTransportParked(transport) &&
+                    bot->GetExactDist(st.deckPos.GetPositionX(), st.deckPos.GetPositionY(),
+                                      st.deckPos.GetPositionZ()) < 4.0f)
+                {
+                    transport->AddPassenger(bot, true);
+                    bot->StopMovingOnCurrentPos();
+                    st.deckPos = WorldPosition();
+                    st.waitPos = WorldPosition();
+                    st.phase = FollowTravelPhase::Aboard;
+                    st.dockWaitSinceMs = now;
+                    LOG_DEBUG("playerbots", "[FollowTravel] {}: aboard ferry {}", bot->GetName(), st.transportEntry);
+                    return true;
+                }
+
+                // The ship left between hop and attach: step back onto our spot on the pier (the dock
+                // stop itself is over the water) and wait for the next one.
+                st.deckPos = WorldPosition();
+                WorldPosition const& back = st.waitPos ? st.waitPos : st.dockPos;
+                bot->NearTeleportTo(back.GetPositionX(), back.GetPositionY(), back.GetPositionZ(),
+                                    bot->GetOrientation());
+                return true;
+            }
+
+            // Once in the harbour, claim a personal spot on the pier so a group of bots waiting for
+            // the same ship stands side by side instead of stacking on the dock key frame.
+            if (!st.waitPosTried &&
+                bot->GetExactDist2d(st.dockPos.GetPositionX(), st.dockPos.GetPositionY()) < DOCK_WAIT_PICK_DIS)
+            {
+                st.waitPosTried = true;
+                sTravelMgr.FindDockWaitSpot(bot, st.dockPos, st.waitPos);
+            }
+
+            if (st.waitPos)
+            {
+                if (bot->GetExactDist2d(st.waitPos.GetPositionX(), st.waitPos.GetPositionY()) > DOCK_WAIT_SPOT_DIS)
+                {
+                    MoveTo(st.waitPos.GetMapId(), st.waitPos.GetPositionX(), st.waitPos.GetPositionY(),
+                           st.waitPos.GetPositionZ(), false, false, false, true);
+                    return true;
+                }
+            }
+            else if (bot->GetExactDist2d(st.dockPos.GetPositionX(), st.dockPos.GetPositionY()) > DOCK_ARRIVE_DIS)
+            {
+                if (TravelFarTo(st, st.dockPos))
+                    return true;
+
+                // The dock key frame is out over the water: hop to dry ground on the pier beside it.
+                WorldPosition pier;
+                if (!sTravelMgr.FindDockWaitSpot(bot, st.dockPos, pier))
+                    pier = st.dockPos;
+                return LegStalled(st, pier, "ferry dock");
+            }
 
             // Standing on the pier. Waiting for a ferry is minutes long by design, so this runs
             // on its own budget instead of the per-leg stuck detection.
@@ -836,35 +1151,19 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
                 return false;
             }
 
-            Transport* transport = FindTransport(bot, st.transportEntry);
-            if (!transport)
-                return true;  // still on the far side of its loop
-
-            // Wait until it is actually parked; boarding a moving hull drops the bot in the sea.
-            if (!TravelMgr::IsTransportParked(transport))
+            // Wait - do not walk anywhere - until the ship is parked right at this pier.
+            if (!transport || !TravelMgr::IsTransportParked(transport) ||
+                bot->GetExactDist2d(transport->GetPositionX(), transport->GetPositionY()) > DOCK_BOARD_DIS)
                 return true;
 
-            // And until it is *this* dock it is parked at - the bot is standing on the pier, so
-            // its own distance to the hull is the reliable test (the model origin is nowhere
-            // near the route's stop node while berthed).
-            if (bot->GetExactDist2d(transport->GetPositionX(), transport->GetPositionY()) > DOCK_BOARD_DIS)
-                return true;
-
-            // Step aboard rather than walk aboard. The navmesh knows nothing about a moving
-            // object and the model origin usually sits inside the hull, so walking at it means
-            // clipping through the boat, falling through the deck, or pacing the gangplank.
+            // Step aboard the way a portal is stepped through; walking onto a hull the navmesh
+            // cannot see is what sent bots through the planks and back and forth on the pier.
             WorldPosition deck;
             if (!sTravelMgr.FindDeckSpot(transport, bot, deck))
-                return true;  // no usable spot this tick - try again while it is still berthed
+                return true;
 
-            bot->NearTeleportTo(deck.GetPositionX(), deck.GetPositionY(), deck.GetPositionZ(),
-                                bot->GetOrientation());
-            transport->AddPassenger(bot, true);
-            bot->StopMovingOnCurrentPos();
-            st.phase = FollowTravelPhase::Aboard;
-            st.dockWaitSinceMs = now;
-            LOG_DEBUG("playerbots", "[FollowTravel] {}: boarded ferry {} bound for map {}", bot->GetName(),
-                      st.transportEntry, st.landPos.GetMapId());
+            st.deckPos = deck;
+            bot->NearTeleportTo(deck.GetPositionX(), deck.GetPositionY(), deck.GetPositionZ(), bot->GetOrientation());
             return true;
         }
 
@@ -884,29 +1183,35 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
             {
                 LOG_DEBUG("playerbots", "[FollowTravel] {}: aboard {} too long - stepping off",
                           bot->GetName(), st.transportEntry);
-                transport->RemovePassenger(bot);
+                WorldPosition pier;
+                bool const havePier = sTravelMgr.FindPierSpot(transport, bot, st.landPos, pier);
+                TravelMgr::DetachFromTransport(bot);
+                if (havePier)
+                    bot->NearTeleportTo(pier.GetPositionX(), pier.GetPositionY(), pier.GetPositionZ(),
+                                        bot->GetOrientation());
                 st.dockWaitSinceMs = 0;
                 st.phase = FollowTravelPhase::None;
                 return true;
             }
 
-            // The core carries passengers across the map boundary, so simply wait until we are
-            // berthed on the goal's side, then step ashore. Measured from the bot, which rides
-            // with the hull - the transport's own origin is offset from the route's stop node.
-            if (bot->GetMapId() == st.landPos.GetMapId() && TravelMgr::IsTransportParked(transport) &&
-                bot->GetExactDist2d(st.landPos.GetPositionX(), st.landPos.GetPositionY()) < DOCK_LEAVE_DIS)
-            {
-                transport->RemovePassenger(bot);
-                // Put the bot on the pier itself. Walking off a deck has the same problem as
-                // walking on: it ends up clipping, or still aboard when the ferry departs.
-                bot->NearTeleportTo(st.landPos.GetPositionX(), st.landPos.GetPositionY(),
-                                    st.landPos.GetPositionZ(), bot->GetOrientation());
-                LOG_DEBUG("playerbots", "[FollowTravel] {}: left ferry {} on map {}", bot->GetName(),
-                          st.transportEntry, bot->GetMapId());
-                st.dockWaitSinceMs = 0;
-                st.phase = FollowTravelPhase::None;
-            }
+            // The core carries passengers across the map boundary. Get off only while the ship is
+            // parked at the destination pier - judged by where WE are (on the deck), which is far
+            // more reliable than the hull origin versus the dock key frame.
+            if (bot->GetMapId() != st.landPos.GetMapId() || !TravelMgr::IsTransportParked(transport) ||
+                bot->GetExactDist2d(st.landPos.GetPositionX(), st.landPos.GetPositionY()) > DOCK_LAND_DIS)
+                return true;
 
+            WorldPosition pier;
+            if (!sTravelMgr.FindPierSpot(transport, bot, st.landPos, pier))
+                return true;  // keep riding; try again next tick while it is still parked
+
+            // Detach first - fully, or the bot keeps a dangling link to the ship - then hop ashore. Never walk off.
+            TravelMgr::DetachFromTransport(bot);
+            bot->NearTeleportTo(pier.GetPositionX(), pier.GetPositionY(), pier.GetPositionZ(), bot->GetOrientation());
+            LOG_DEBUG("playerbots", "[FollowTravel] {}: left ferry {} at map {}", bot->GetName(), st.transportEntry,
+                      bot->GetMapId());
+            st.dockWaitSinceMs = 0;
+            st.phase = FollowTravelPhase::None;
             return true;
         }
 
@@ -919,7 +1224,7 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
             }
 
             if (bot->GetExactDist2d(st.portalStaging.GetPositionX(), st.portalStaging.GetPositionY()) > PORTAL_STEP_DIS)
-                return TravelFarTo(st, st.portalStaging);
+                return TravelFarTo(st, st.portalStaging) || LegStalled(st, st.portalStaging, "portal");
 
             // Step through the portal - the same short hop a player's click performs.
             bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
@@ -937,31 +1242,86 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
                 return true;
             }
 
-            if (bot->GetExactDist2d(st.goal.GetPositionX(), st.goal.GetPositionY()) < ARRIVE_DIS)
-                return false;  // plain follow closes the last few yards
+            // Dungeon goals are walked right onto the portal (Execute steps inside); for a master
+            // plain follow closes the last few yards.
+            if (bot->GetExactDist2d(st.goal.GetPositionX(), st.goal.GetPositionY()) <
+                (st.goalIsDungeon ? DUNGEON_STEP_DIS : ARRIVE_DIS))
+                return false;
 
-            if (TravelFarTo(st, st.goal))
+            WorldPosition const target = st.approachPos ? st.approachPos : st.goal;
+            bool const onApproach =
+                st.approachPos && bot->GetExactDist(st.approachPos.GetPositionX(), st.approachPos.GetPositionY(),
+                                                    st.approachPos.GetPositionZ()) <= APPROACH_AT_DIS;
+
+            if (!onApproach && TravelFarTo(st, target))
                 return true;
 
-            // The leg gave up: no progress for LEG_STUCK_MS while still further than ARRIVE_DIS out.
-            // SameMapReachable() deliberately accepts PATHFIND_INCOMPLETE, because a long overland
-            // trip is walked as a chain of partial paths - but a goal the navmesh genuinely cannot
-            // reach reports the same INCOMPLETE, and the bot then parks on the nearest reachable
-            // polygon and re-plans the identical leg forever. Hellfire Citadel is where this shows:
-            // the Blood Furnace door sits ~33y up on the wall dividing the peninsula, so a bot bound
-            // for it walks the passage it shares with Ramparts / Shattered Halls, stops at the
-            // Shattered Halls door and mills there. Treat an aborted final leg like "no road route"
-            // and hop the remainder rather than looping.
-            if (sPlayerbotAIConfig.smartTravelTeleportFallback && !bot->IsInCombat())
+            // Dead end: the leg stopped making progress, or we reached the closest walkable point.
+            float const gap =
+                bot->GetExactDist(st.goal.GetPositionX(), st.goal.GetPositionY(), st.goal.GetPositionZ());
+
+            // Far from the goal: never hop onto it from here.
+            if (gap > APPROACH_SEARCH_DIS)
             {
-                LOG_DEBUG("playerbots", "[FollowTravel] {}: final approach stalled {:.0f}y short on map {} - teleport fallback",
-                          bot->GetName(), bot->GetExactDist2d(st.goal.GetPositionX(), st.goal.GetPositionY()),
-                          st.goal.GetMapId());
-                bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
-                bot->TeleportTo(st.goal.GetMapId(), st.goal.GetPositionX(), st.goal.GetPositionY(),
-                                st.goal.GetPositionZ(), bot->GetOrientation());
+                if (st.approachTries++ < MAX_APPROACH_TRIES)
+                {
+                    st.approachPos = WorldPosition();
+                    st.ResetLeg(st.goal);
+                    return true;
+                }
+
+                // A flight may get round what the road cannot.
+                if (gap > TAXI_WORTH_DIS && PlanFlight(st, st.goal, gap))
+                    return true;
+
+                // Else the flight master nearest the goal, when that is really nearer - a travel point to walk on
+                // from, not the goal.
+                TravelMgr::FlightMasterInfo const* fm = sTravelMgr.GetFlightMasterNear(st.goal, bot->GetTeamId());
+                if (fm && st.goal.GetExactDist(fm->pos.GetPositionX(), fm->pos.GetPositionY(),
+                                               fm->pos.GetPositionZ()) + HOP_MIN_GAIN < gap)
+                    return HopTo(st, fm->pos, "stuck far from the goal");
+
+                LOG_DEBUG("playerbots", "[FollowTravel] {}: stuck {:.0f}y from goal - giving up, no teleport",
+                          bot->GetName(), gap);
+                st.phase = FollowTravelPhase::None;
+                return false;
             }
 
+            // Near the goal: is there a walkable spot closer than where we stand?
+            WorldPosition closest;
+            bool const found = FindApproachPoint(bot, st.goal, closest);
+            float const closestGap =
+                found ? st.goal.GetExactDist(closest.GetPositionX(), closest.GetPositionY(), closest.GetPositionZ())
+                      : gap;
+            float const toClosest =
+                found ? bot->GetExactDist(closest.GetPositionX(), closest.GetPositionY(), closest.GetPositionZ())
+                      : 0.0f;
+
+            // Standing on it already, or it is no nearer the goal than we are.
+            bool const atClosest = !found || toClosest <= APPROACH_AT_DIS || closestGap + APPROACH_AT_DIS >= gap;
+
+            if (!atClosest && st.approachTries++ < MAX_APPROACH_TRIES)
+            {
+                st.approachPos = closest;
+                st.ResetLeg(closest);
+                LOG_DEBUG("playerbots", "[FollowTravel] {}: walking to closest reachable point {:.0f}y from goal",
+                          bot->GetName(), closestGap);
+                return true;
+            }
+
+            // As close as the navmesh lets us get. Only now, and only for a short remainder, hop it.
+            if (atClosest && gap <= sPlayerbotAIConfig.smartTravelTeleportNearDist)
+            {
+                if (!HopTo(st, st.goal, "at the closest reachable point to the goal"))
+                {
+                    st.phase = FollowTravelPhase::None;
+                    return false;
+                }
+                return true;
+            }
+
+            LOG_DEBUG("playerbots", "[FollowTravel] {}: cannot get closer than {:.0f}y - giving up, no teleport",
+                      bot->GetName(), gap);
             st.phase = FollowTravelPhase::None;
             return false;
         }
@@ -996,17 +1356,15 @@ bool FollowTravelAction::TravelFarTo(FollowTravelState& st, WorldPosition const&
 
     uint32 const now = getMSTime();
 
-    // Swimming for a long stretch means the route is crossing open water the navmesh only
-    // "solves" by letting the cone sampler hop from wave to wave - that is how a bot ends up
-    // swimming a lake or an ocean under the terrain. Bail so the caller can re-plan (or fall
-    // back to a teleport) instead of grinding across.
+    // Swimming for a long stretch means the leg is crossing open water the navmesh cannot solve - that is how a bot
+    // ends up swimming a lake or an ocean under the terrain. Report a stall so the caller can retry or hop.
     if (bot->IsInWater())
     {
         if (st.swimSinceMs == 0)
             st.swimSinceMs = now;
         else if (now - st.swimSinceMs > MAX_SWIM_MS)
         {
-            LOG_DEBUG("playerbots", "[FollowTravel] {}: swimming too long toward ({:.0f},{:.0f}) - aborting leg",
+            LOG_DEBUG("playerbots", "[FollowTravel] {}: swimming too long toward ({:.0f},{:.0f}) - leg stalled",
                       bot->GetName(), dest.GetPositionX(), dest.GetPositionY());
             return false;
         }
@@ -1022,68 +1380,43 @@ bool FollowTravelAction::TravelFarTo(FollowTravelState& st, WorldPosition const&
         st.nearestMoveFarDis = distToDest;
         st.stuckSinceMs = now;
         st.stuckAttempts = 0;
+        st.giveUpAtMs = now + GIVE_UP_MS;  // real progress keeps the plan alive, however long the road
     }
     else if (++st.stuckAttempts >= 5 && st.stuckSinceMs != 0 && GetMSTimeDiffToNow(st.stuckSinceMs) >= LEG_STUCK_MS)
     {
-        return false;  // no meaningful progress - abort the trip (never teleport to the master)
+        return false;  // no meaningful progress - the leg stalled
     }
 
+    // A complete route may lead away for a while; a guess that carries the bot this far off does not get to.
+    if (!st.onRoute && st.nearestMoveFarDis < FLT_MAX && distToDest > st.nearestMoveFarDis + REGRESS_DIS)
+    {
+        LOG_DEBUG("playerbots", "[FollowTravel] {}: drifted {:.0f}y away from ({:.0f},{:.0f}) - leg stalled",
+                  bot->GetName(), distToDest - st.nearestMoveFarDis, dest.GetPositionX(), dest.GetPositionY());
+        return false;
+    }
+
+    // A refused move (rooted, mid-cast, the same point twice) is not a stall - the timer above decides that.
     if (distToDest < PATHFINDER_DIS)
     {
         WorldPosition wp = AvoidHostiles(botAI, bot, dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
-        return MoveTo(wp.GetMapId(), wp.GetPositionX(), wp.GetPositionY(), wp.GetPositionZ(), false, false, false, true);
+        MoveTo(wp.GetMapId(), wp.GetPositionX(), wp.GetPositionY(), wp.GetPositionZ(), false, false, false, true);
+        return true;
     }
 
-    uint32 const typeOk = PATHFIND_NORMAL | PATHFIND_INCOMPLETE | PATHFIND_FARFROMPOLY;
+    if (st.nextStepSearchMs && now < st.nextStepSearchMs)
+        return true;
 
+    WorldPosition step;
+    bool onRoute = false;
+    if (!NextRouteStep(bot, dest, step, onRoute))
     {
-        PathGenerator path(bot);
-        path.CalculatePath(dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
-        if (!(path.GetPathType() & ~typeOk))
-        {
-            G3D::Vector3 const& end = path.GetActualEndPosition();
-            if (dest.GetExactDist(end.x, end.y, end.z) + 5.0f < distToDest)
-            {
-                WorldPosition wp = AvoidHostiles(botAI, bot, end.x, end.y, end.z);
-                return MoveTo(bot->GetMapId(), wp.GetPositionX(), wp.GetPositionY(), wp.GetPositionZ(), false, false,
-                              false, true);
-            }
-        }
+        st.nextStepSearchMs = now + STEP_SEARCH_RETRY_MS;
+        return true;  // nothing usable this tick, but not declared stuck yet
     }
 
-    // Sample the forward cone for a reachable stepping stone so the bot keeps moving.
-    float const x = bot->GetPositionX();
-    float const y = bot->GetPositionY();
-    float const z = bot->GetPositionZ();
-    float const baseAngle = bot->GetAngle(dest.GetPositionX(), dest.GetPositionY());
-    float best = static_cast<float>(M_PI);
-    float rx = 0.0f;
-    float ry = 0.0f;
-    float rz = 0.0f;
-    bool found = false;
-    for (int i = 0; i < 2; ++i)
-    {
-        float const delta = (rand_norm() - 0.5f) * static_cast<float>(M_PI);
-        float const sampleDis = (0.5f + rand_norm() * 0.5f) * PATHFINDER_DIS;
-        float const angle = baseAngle + delta;
-        float const dx = x + std::cos(angle) * sampleDis;
-        float const dy = y + std::sin(angle) * sampleDis;
-        float const dz = z + 0.5f;
-        PathGenerator path(bot);
-        path.CalculatePath(dx, dy, dz);
-        if (!(path.GetPathType() & ~typeOk) && std::fabs(delta) <= best)
-        {
-            found = true;
-            G3D::Vector3 const& end = path.GetActualEndPosition();
-            rx = end.x;
-            ry = end.y;
-            rz = end.z;
-            best = std::fabs(delta);
-        }
-    }
-
-    if (found)
-        return MoveTo(bot->GetMapId(), rx, ry, rz, false, false, false, true);
-
-    return true;  // nothing usable this tick, but not declared stuck yet
+    st.nextStepSearchMs = 0;
+    st.onRoute = onRoute;
+    WorldPosition wp = AvoidHostiles(botAI, bot, step.GetPositionX(), step.GetPositionY(), step.GetPositionZ());
+    MoveTo(bot->GetMapId(), wp.GetPositionX(), wp.GetPositionY(), wp.GetPositionZ(), false, false, false, true);
+    return true;
 }

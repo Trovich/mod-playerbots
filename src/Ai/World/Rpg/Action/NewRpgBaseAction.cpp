@@ -114,14 +114,15 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
         // have walked to, and it is what frees a bot from a portal-only pocket such as
         // Darnassus - whose flight master and boat dock both sit on the far side of the
         // Rut'theran portal, so nothing it wants is reachable on foot.
-        TravelMgr::PortalHop hop;
-        if (sTravelMgr.FindPortalHop(bot, dest, hop, false))
+        TravelMgr::TravelEdge edge;
+        if (sTravelMgr.NextTravelEdge(bot, dest, edge) && edge.kind == TravelMgr::TravelEdge::Kind::Portal &&
+            edge.staging.GetMapId() == bot->GetMapId())
         {
             LOG_DEBUG("playerbots", "[New RPG] {} takes the portal on map {} toward its goal instead of teleporting",
-                      bot->GetName(), hop.staging.GetMapId());
+                      bot->GetName(), edge.staging.GetMapId());
             bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
-            return bot->TeleportTo(hop.destMap, hop.destPos.GetPositionX(), hop.destPos.GetPositionY(),
-                                   hop.destPos.GetPositionZ(), hop.destPos.GetOrientation());
+            return bot->TeleportTo(edge.dest.GetMapId(), edge.dest.GetPositionX(), edge.dest.GetPositionY(),
+                                   edge.dest.GetPositionZ(), edge.dest.GetOrientation());
         }
 
         bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);

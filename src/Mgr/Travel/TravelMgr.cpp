@@ -11,7 +11,10 @@
 #include "Corpse.h"
 #include "Creature.h"
 #include "Log.h"
+#include "GameObjectModel.h"
+#include "GridTerrainData.h"
 #include "Map.h"
+#include "ModelIgnoreFlags.h"
 #include "MapCollisionData.h"
 #include "MapMgr.h"
 #include "ObjectAccessor.h"
@@ -27,11 +30,15 @@
 #include "TravelNode.h"
 #include "VMapFactory.h"
 #include "VMapMgr2.h"
+#include <algorithm>
 #include <cmath>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <numeric>
+#include <queue>
 #include <set>
+#include <unordered_map>
 
 // Navigation data
 
@@ -4366,6 +4373,7 @@ void TravelMgr::Init()
         PrepareDestinationCache();
     }
     sTravelNodeMap.InitTaxiGraph();
+    BuildFactionTaxiGraph();
     LoadTransportRoutes();
     LOG_INFO("playerbots", "Playerbots Taxi graph and destination cache built.");
 }
@@ -4484,37 +4492,6 @@ std::vector<std::vector<uint32>> TravelMgr::GetOptimalFlightDestinations(Player*
     return validDestinations;
 }
 
-std::vector<uint32> TravelMgr::GetFlightPathToward(Player* bot, WorldPosition const& goal, WorldPosition* outArrival)
-{
-    if (!bot)
-        return {};
-
-    FlightMasterInfo const* from = GetNearestFlightMasterInfo(bot);
-    if (!from || from->taxiNodeId == 0)
-        return {};
-
-    // The bot has to be able to reach that flight master on foot first.
-    if (bot->GetExactDist(from->pos.GetPositionX(), from->pos.GetPositionY(), from->pos.GetPositionZ()) > 500.0f)
-        return {};
-
-    uint32 toNode = sObjectMgr->GetNearestTaxiNode(goal.GetPositionX(), goal.GetPositionY(), goal.GetPositionZ(),
-                                                   goal.GetMapId(), bot->GetTeamId());
-    if (!toNode || toNode == from->taxiNodeId)
-        return {};
-
-    std::vector<uint32> path = sTravelNodeMap.FindTaxiPath(from->taxiNodeId, toNode);
-    if (path.size() < 2)
-        return {};
-
-    if (outArrival)
-    {
-        if (TaxiNodesEntry const* dest = sTaxiNodesStore.LookupEntry(toNode))
-            *outArrival = WorldPosition(dest->map_id, dest->x, dest->y, dest->z, 0.0f);
-    }
-
-    return path;
-}
-
 namespace
 {
     // Inter-city portal objects, verified against gameobject_template (type 22 = spell caster)
@@ -4630,113 +4607,6 @@ namespace
         return nullptr;
     }
 
-    // How close the bot must already be for a portal to count as "in reach on foot".
-    constexpr float PORTAL_HUB_REACH = 400.0f;
-
-    // One usable crossing: where the bot must stand, and where it comes out.
-    struct PortalChoice
-    {
-        WorldPosition staging;
-        WorldPosition dest;
-    };
-
-    // Best crossing on the bot's current map for reaching `goal`. `inReach` selects between
-    // "I am standing at it" and "I still have to travel to it". Scores candidates by how close
-    // they land to the goal, which is also what keeps an Outland-bound bot out of the Exodar /
-    // Silvermoon portals: those also land on map 530, but on the detached Azuremyst / Eversong
-    // landmasses, thousands of yards from Outland proper with no navmesh connection to it.
-    // A same-map hop must actually buy something, or the bot would ping-pong through a portal
-    // (Darnassus -> Rut'theran -> Darnassus ...).
-    constexpr float PORTAL_SAME_MAP_GAIN = 300.0f;
-
-    bool PickPortal(Player* bot, WorldPosition const& goal, bool inReach, PortalChoice& out)
-    {
-        if (!bot)
-            return false;
-
-        bool found = false;
-        float bestScore = std::numeric_limits<float>::max();
-
-        auto consider = [&](WorldPosition const& staging, WorldPosition const& dest, uint8 minLevel)
-        {
-            if (minLevel && bot->GetLevel() < minLevel)
-                return;
-
-            if (staging.GetMapId() != bot->GetMapId() || dest.GetMapId() != goal.GetMapId())
-                return;
-
-            if ((bot->GetExactDist2d(staging.GetPositionX(), staging.GetPositionY()) <= PORTAL_HUB_REACH) != inReach)
-                return;
-
-            float const score = goal.GetExactDist2d(dest.GetPositionX(), dest.GetPositionY());
-
-            // Landing on the map we are already on only helps if it closes real distance -
-            // that is what makes the Darnassus / Rut'theran portal usable without looping.
-            if (dest.GetMapId() == bot->GetMapId() &&
-                score + PORTAL_SAME_MAP_GAIN >= goal.GetExactDist2d(bot->GetPositionX(), bot->GetPositionY()))
-                return;
-            if (score >= bestScore)
-                return;
-
-            bestScore = score;
-            found = true;
-            out.staging = staging;
-            out.dest = dest;
-        };
-
-        for (PortalRow const& row : PORTAL_ROWS)
-        {
-            if (row.team != TEAM_NEUTRAL && row.team != bot->GetTeamId())
-                continue;
-
-            SpellTargetPosition const* pos = ResolvePortalDestination(row.spellId);
-            if (!pos)
-                continue;
-
-            consider(WorldPosition(row.hubMap, row.x, row.y, row.z, 0.0f),
-                     WorldPosition(pos->target_mapId, pos->target_X, pos->target_Y, pos->target_Z,
-                                   pos->target_Orientation),
-                     row.minLevel);
-        }
-
-        for (AreaTriggerHop const& hop : AREATRIGGER_HOPS)
-        {
-            AreaTrigger const* at = sObjectMgr->GetAreaTrigger(hop.triggerId);
-            AreaTriggerTeleport const* tp = sObjectMgr->GetAreaTriggerTeleport(hop.triggerId);
-            if (!at || !tp)
-                continue;
-
-            consider(WorldPosition(at->map, at->x, at->y, at->z, at->orientation),
-                     WorldPosition(tp->target_mapId, tp->target_X, tp->target_Y, tp->target_Z,
-                                   tp->target_Orientation),
-                     hop.minLevel);
-        }
-
-        return found;
-    }
-}
-
-bool TravelMgr::FindPortalHop(Player* bot, WorldPosition const& goal, PortalHop& out, bool requireInReach) const
-{
-    PortalChoice choice;
-    if (!PickPortal(bot, goal, true, choice) && (requireInReach || !PickPortal(bot, goal, false, choice)))
-        return false;
-
-    out.staging = choice.staging;
-    out.radius = 12.0f;
-    out.destMap = choice.dest.GetMapId();
-    out.destPos = choice.dest;
-    return true;
-}
-
-bool TravelMgr::GetPortalHubStaging(Player* bot, WorldPosition const& goal, WorldPosition& outHub) const
-{
-    PortalChoice choice;
-    if (!PickPortal(bot, goal, false, choice))
-        return false;
-
-    outHub = choice.staging;
-    return true;
 }
 
 void TravelMgr::LoadTransportRoutes()
@@ -4747,6 +4617,7 @@ void TravelMgr::LoadTransportRoutes()
     if (!result)
     {
         LOG_INFO("playerbots", "Playerbots: no moving transports found - ferry travel disabled.");
+        BuildTravelEdges();
         return;
     }
 
@@ -4755,9 +4626,8 @@ void TravelMgr::LoadTransportRoutes()
         uint32 const entry = (*result)[0].Get<uint32>();
 
         TransportTemplate const* tmpl = sTransportMgr->GetTransportTemplate(entry);
-        // Only continent ferries are useful: instance transports go nowhere a traveller needs,
-        // and a transport that never leaves one map cannot bridge two continents.
-        if (!tmpl || tmpl->inInstance || tmpl->mapsUsed.size() < 2)
+        // Instance transports go nowhere a traveller needs.
+        if (!tmpl || tmpl->inInstance)
             continue;
 
         TransportRoute route;
@@ -4765,9 +4635,10 @@ void TravelMgr::LoadTransportRoutes()
         route.pathTime = tmpl->pathTime;
 
         if (GameObjectTemplate const* go = sObjectMgr->GetGameObjectTemplate(entry))
-            route.isZeppelin = go->name.find("Zeppelin") != std::string::npos;
+            route.isZeppelin = go->name.find("Zeppelin") != std::string::npos ||
+                               go->name.find("Zephyr") != std::string::npos;
 
-        std::set<uint32> stopMaps;
+        std::set<uint32> stopRegions;
         for (KeyFrame const& frame : tmpl->keyFrames)
         {
             if (!frame.Node || !frame.IsStopFrame())
@@ -4779,30 +4650,532 @@ void TravelMgr::LoadTransportRoutes()
             stop.arriveTime = frame.ArriveTime;
             stop.departureTime = frame.DepartureTime;
             route.stops.push_back(stop);
-            stopMaps.insert(stop.mapId);
+            stopRegions.insert(GetTravelRegion(stop.pos));
         }
 
-        // A ferry needs docks on at least two maps; otherwise there is nothing to route with.
-        if (stopMaps.size() < 2)
+        // A ferry is useful when its docks lie in different travel regions - including boats that
+        // never leave their map. Loops inside one region (Northrend's quest transports) are skipped.
+        if (stopRegions.size() < 2)
             continue;
 
         transportRoutes.push_back(std::move(route));
     } while (result->NextRow());
 
     LOG_INFO("playerbots", "Playerbots: loaded {} ferry route(s) for bot travel.", transportRoutes.size());
+
+    BuildTravelEdges();
 }
 
-// Continents the game itself gates behind a level: sailing a level 20 bot to Northrend would
-// just strand it in content it cannot survive.
-static bool FerryDestinationSuitable(Player* bot, uint32 destMap)
+// Regions the game itself gates behind a level: sending a level 20 bot to Northrend would just
+// strand it in content it cannot survive.
+static bool RegionSuitable(Player* bot, uint32 region)
 {
     uint32 const level = bot->GetLevel();
 
-    if (destMap == 530)   // Outland
+    if (region == 5300)                    // Outland proper
         return level >= 58;
-    if (destMap == 571)   // Northrend
+    if (region == 5710 || region == 5711)  // Northrend, Dalaran
         return level >= 68;
 
+    return true;
+}
+
+uint32 TravelMgr::GetTravelRegion(uint32 mapId, float x, float y, float z)
+{
+    uint32 const base = mapId * 10;
+
+    switch (mapId)
+    {
+        case 1:
+            // Teldrassil. The canopy (Darnassus and the forest on top of the tree) and the village at
+            // its roots share map 1 but are joined only by a portal; the island in turn reaches
+            // Kalimdor only by hippogryph or boat.
+            if (x > 8000.0f && x < 11500.0f && y > -500.0f && y < 3000.0f)
+                return z > 250.0f ? base + 1 : base + 2;
+            return base;
+        case 530:
+            // Azuremyst / Bloodmyst / The Exodar - reached from Kalimdor by boat only.
+            if (x > -6500.0f && x < -500.0f && y > -14500.0f && y < -9500.0f)
+                return base + 1;
+            // Isle of Quel'Danas.
+            if (x > 12500.0f && y > -8500.0f && y < -4500.0f)
+                return base + 3;
+            // Eversong / Silvermoon / Ghostlands.
+            if (x > 5500.0f && y > -8500.0f && y < -4500.0f)
+                return base + 2;
+            return base;  // Outland proper
+        case 571:
+            // Dalaran floats above Crystalsong Forest.
+            if (x > 5300.0f && x < 6300.0f && y > 100.0f && y < 1200.0f && z > 450.0f)
+                return base + 1;
+            return base;
+        default:
+            return base;
+    }
+}
+
+TravelMgr::FlightMasterInfo const* TravelMgr::GetFlightMasterForNode(uint32 taxiNode, TeamId team) const
+{
+    auto const& cache = team == TEAM_ALLIANCE ? allianceFlightMasterCache : hordeFlightMasterCache;
+    for (auto const& [dbGuid, info] : cache)
+        if (info.taxiNodeId == taxiNode)
+            return &info;
+
+    return nullptr;
+}
+
+std::vector<uint32> TravelMgr::GetTaxiRoute(uint32 fromNode, uint32 toNode) const
+{
+    return sTravelNodeMap.FindTaxiPath(fromNode, toNode);
+}
+
+namespace
+{
+    // A taxi node this faction can use: part of the taxi network and served by a mount of its own (neutral nodes
+    // serve both). Mirrors the filter of ObjectMgr::GetNearestTaxiNode.
+    bool TaxiNodeServes(uint32 nodeId, TeamId team)
+    {
+        TaxiNodesEntry const* node = sTaxiNodesStore.LookupEntry(nodeId);
+        if (!node || !node->MountCreatureID[team == TEAM_ALLIANCE ? 1 : 0])
+            return false;
+
+        uint8 const field = static_cast<uint8>((nodeId - 1) / 32);
+        uint32 const submask = 1u << ((nodeId - 1) % 32);
+        return field < TaxiMaskSize && (sTaxiNodesMask[field] & submask);
+    }
+}
+
+void TravelMgr::BuildFactionTaxiGraph()
+{
+    uint32 links = 0;
+    for (TeamId const team : { TEAM_ALLIANCE, TEAM_HORDE })
+    {
+        auto& graph = factionTaxiGraph[team];
+        graph.clear();
+
+        for (uint32 i = 0; i < sTaxiPathStore.GetNumRows(); ++i)
+        {
+            TaxiPathEntry const* path = sTaxiPathStore.LookupEntry(i);
+            if (!path || !path->from || !path->to || path->from == path->to)
+                continue;
+
+            TaxiNodesEntry const* from = sTaxiNodesStore.LookupEntry(path->from);
+            TaxiNodesEntry const* to = sTaxiNodesStore.LookupEntry(path->to);
+            if (!from || !to || from->map_id != to->map_id)
+                continue;
+
+            if (!TaxiNodeServes(path->from, team) || !TaxiNodeServes(path->to, team))
+                continue;
+
+            if (path->ID >= sTaxiPathNodesByPath.size())
+                continue;
+
+            TaxiPathNodeList const& points = sTaxiPathNodesByPath[path->ID];
+            if (points.size() < 2)
+                continue;
+
+            float length = 0.0f;
+            bool sameMap = true;
+            for (size_t p = 0; p < points.size(); ++p)
+            {
+                if (!points[p] || points[p]->mapid != from->map_id)
+                {
+                    sameMap = false;
+                    break;
+                }
+
+                if (p)
+                {
+                    float const dx = points[p]->x - points[p - 1]->x;
+                    float const dy = points[p]->y - points[p - 1]->y;
+                    float const dz = points[p]->z - points[p - 1]->z;
+                    length += std::sqrt(dx * dx + dy * dy + dz * dz);
+                }
+            }
+
+            if (!sameMap)
+                continue;
+
+            graph[path->from].emplace_back(path->to, length);
+            ++links;
+        }
+    }
+
+    LOG_INFO("playerbots", "Playerbots: {} faction taxi link(s) for bot travel.", links);
+}
+
+std::vector<uint32> TravelMgr::GetFactionTaxiRoute(uint32 fromNode, uint32 toNode, TeamId team) const
+{
+    if (fromNode == toNode || (team != TEAM_ALLIANCE && team != TEAM_HORDE))
+        return {};
+
+    auto const& graph = factionTaxiGraph[team];
+    if (graph.find(fromNode) == graph.end())
+        return {};
+
+    // Dijkstra over a graph of a couple of hundred nodes - cheap enough to run per plan.
+    std::unordered_map<uint32, float> dist;
+    std::unordered_map<uint32, uint32> prev;
+    using Entry = std::pair<float, uint32>;
+    std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+    dist[fromNode] = 0.0f;
+    open.emplace(0.0f, fromNode);
+
+    while (!open.empty())
+    {
+        auto const [d, node] = open.top();
+        open.pop();
+        if (node == toNode)
+            break;
+
+        if (d > dist[node])
+            continue;
+
+        auto const links = graph.find(node);
+        if (links == graph.end())
+            continue;
+
+        for (auto const& [next, length] : links->second)
+        {
+            auto const known = dist.find(next);
+            if (known != dist.end() && known->second <= d + length)
+                continue;
+
+            dist[next] = d + length;
+            prev[next] = node;
+            open.emplace(d + length, next);
+        }
+    }
+
+    if (!prev.count(toNode))
+        return {};
+
+    std::vector<uint32> route{ toNode };
+    while (route.back() != fromNode && route.size() <= prev.size())
+        route.push_back(prev[route.back()]);
+
+    if (route.back() != fromNode)
+        return {};
+
+    std::reverse(route.begin(), route.end());
+    return route;
+}
+
+bool TravelMgr::PlanFlightToward(Player* bot, WorldPosition const& target, float maxWalk, FlightPlan& out) const
+{
+    if (!bot || !target || bot->GetMapId() != target.GetMapId())
+        return false;
+
+    TeamId const team = bot->GetTeamId();
+    uint32 const botRegion =
+        GetTravelRegion(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+    uint32 const targetRegion = GetTravelRegion(target);
+
+    // Where to land: this faction's node nearest the target, on the target's own piece of land.
+    uint32 landNode = 0;
+    float landDist = std::numeric_limits<float>::max();
+    for (uint32 i = 1; i < sTaxiNodesStore.GetNumRows(); ++i)
+    {
+        TaxiNodesEntry const* node = sTaxiNodesStore.LookupEntry(i);
+        if (!node || node->map_id != target.GetMapId() || !TaxiNodeServes(i, team))
+            continue;
+
+        if (GetTravelRegion(node->map_id, node->x, node->y, node->z) != targetRegion)
+            continue;
+
+        float const d = target.GetExactDist2d(node->x, node->y);
+        if (d < landDist)
+        {
+            landDist = d;
+            landNode = i;
+        }
+    }
+
+    TaxiNodesEntry const* land = landNode ? sTaxiNodesStore.LookupEntry(landNode) : nullptr;
+    if (!land)
+        return false;
+
+    // Where to board: the few nearest flight masters we can walk to.
+    std::vector<std::pair<float, FlightMasterInfo const*>> boards;
+    auto const& cache = team == TEAM_ALLIANCE ? allianceFlightMasterCache : hordeFlightMasterCache;
+    for (auto const& [dbGuid, info] : cache)
+    {
+        if (!info.taxiNodeId || info.pos.GetMapId() != bot->GetMapId() || GetTravelRegion(info.pos) != botRegion)
+            continue;
+
+        float const d = bot->GetExactDist2d(info.pos.GetPositionX(), info.pos.GetPositionY());
+        if (d <= maxWalk)
+            boards.emplace_back(d, &info);
+    }
+
+    std::sort(boards.begin(), boards.end(),
+              [](auto const& a, auto const& b) { return a.first < b.first; });
+    if (boards.size() > 4)
+        boards.resize(4);
+
+    bool found = false;
+    float best = std::numeric_limits<float>::max();
+    for (auto const& [walk, fm] : boards)
+    {
+        if (fm->taxiNodeId == landNode)
+            continue;
+
+        std::vector<uint32> nodes = GetFactionTaxiRoute(fm->taxiNodeId, landNode, team);
+        if (nodes.size() < 2 || nodes.size() - 1 > sPlayerbotAIConfig.smartTravelMaxTaxiHops)
+            continue;
+
+        float const cost = walk + landDist;
+        if (cost >= best)
+            continue;
+
+        best = cost;
+        found = true;
+        out.flightMaster = fm;
+        out.nodes = std::move(nodes);
+        out.arrival = WorldPosition(land->map_id, land->x, land->y, land->z, 0.0f);
+        out.walkDist = walk;
+        out.landDist = landDist;
+    }
+
+    return found;
+}
+
+TravelMgr::FlightMasterInfo const* TravelMgr::GetFlightMasterNear(WorldPosition const& pos, TeamId team) const
+{
+    uint32 const region = GetTravelRegion(pos);
+    auto const& cache = team == TEAM_ALLIANCE ? allianceFlightMasterCache : hordeFlightMasterCache;
+
+    FlightMasterInfo const* nearest = nullptr;
+    float best = std::numeric_limits<float>::max();
+    for (auto const& [dbGuid, info] : cache)
+    {
+        if (info.pos.GetMapId() != pos.GetMapId() || GetTravelRegion(info.pos) != region)
+            continue;
+
+        float const d = pos.GetExactDist2d(info.pos.GetPositionX(), info.pos.GetPositionY());
+        if (d < best)
+        {
+            best = d;
+            nearest = &info;
+        }
+    }
+
+    return nearest;
+}
+
+bool TravelMgr::HasStaleTransportLink(Player* bot)
+{
+    if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported() || bot->GetVehicle())
+        return false;
+
+    Transport* transport = bot->GetTransport();
+    bool const flagged = bot->HasUnitMovementFlag(MOVEMENTFLAG_ONTRANSPORT) ||
+                         !bot->m_movementInfo.transport.guid.IsEmpty() ||
+                         bot->HasUnitState(UNIT_STATE_IGNORE_PATHFINDING);
+
+    if (!transport)
+        return flagged;
+
+    // Linked to a transport: stale unless this map still owns it and lists us aboard.
+    if (!bot->GetMap()->GetAllTransports().count(transport))
+        return true;
+
+    return !transport->GetPassengers().count(bot);
+}
+
+void TravelMgr::DetachFromTransport(Player* bot)
+{
+    if (!bot)
+        return;
+
+    // Only call into a transport this map still owns. A stale link may point at a ship that sailed on to another
+    // map without us - which it only does when we are not on its passenger list - or at a deleted elevator.
+    Transport* transport = bot->GetTransport();
+    if (transport && bot->FindMap() && bot->GetMap()->GetAllTransports().count(transport))
+        transport->RemovePassenger(bot, true);
+
+    // Stop a spline laid out in transport space before the link it depends on disappears.
+    bot->DisableSpline();
+
+    bot->SetTransport(nullptr);
+    bot->m_movementInfo.transport.Reset();
+    bot->m_movementInfo.RemoveMovementFlag(MOVEMENTFLAG_ONTRANSPORT);
+    bot->ClearUnitState(UNIT_STATE_IGNORE_PATHFINDING);
+}
+
+void TravelMgr::BuildTravelEdges()
+{
+    travelEdges.clear();
+
+    auto add = [this](TravelEdge edge)
+    {
+        edge.fromRegion = GetTravelRegion(edge.staging);
+        edge.toRegion = GetTravelRegion(edge.dest);
+        if (edge.fromRegion != edge.toRegion)  // a hop inside one region buys nothing
+            travelEdges.push_back(edge);
+    };
+
+    for (PortalRow const& row : PORTAL_ROWS)
+    {
+        SpellTargetPosition const* pos = ResolvePortalDestination(row.spellId);
+        if (!pos)
+            continue;
+
+        TravelEdge edge;
+        edge.kind = TravelEdge::Kind::Portal;
+        edge.staging = WorldPosition(row.hubMap, row.x, row.y, row.z, 0.0f);
+        edge.dest = WorldPosition(pos->target_mapId, pos->target_X, pos->target_Y, pos->target_Z,
+                                  pos->target_Orientation);
+        edge.team = row.team;
+        edge.minLevel = row.minLevel;
+        add(edge);
+    }
+
+    for (AreaTriggerHop const& hop : AREATRIGGER_HOPS)
+    {
+        AreaTrigger const* at = sObjectMgr->GetAreaTrigger(hop.triggerId);
+        AreaTriggerTeleport const* tp = sObjectMgr->GetAreaTriggerTeleport(hop.triggerId);
+        if (!at || !tp)
+            continue;
+
+        TravelEdge edge;
+        edge.kind = TravelEdge::Kind::Portal;
+        edge.staging = WorldPosition(at->map, at->x, at->y, at->z, at->orientation);
+        edge.dest = WorldPosition(tp->target_mapId, tp->target_X, tp->target_Y, tp->target_Z, tp->target_Orientation);
+        edge.minLevel = hop.minLevel;
+        add(edge);
+    }
+
+    // Taxi links that cross a region seam - the Rut'theran hippogryph to Auberdine, Dalaran's
+    // flights down to the Northrend mainland. Built per faction from the flight masters that
+    // actually exist, so an edge always starts at an NPC the bot can talk to.
+    for (TeamId const team : { TEAM_ALLIANCE, TEAM_HORDE })
+        for (auto const& [from, links] : factionTaxiGraph[team])
+        {
+            // Only flights this faction can really take, from a flight master it can really talk to.
+            FlightMasterInfo const* fm = GetFlightMasterForNode(from, team);
+            if (!fm)
+                continue;
+
+            for (auto const& link : links)
+            {
+                uint32 const to = link.first;
+                TaxiNodesEntry const* toNode = sTaxiNodesStore.LookupEntry(to);
+                if (!toNode)
+                    continue;
+
+                TravelEdge edge;
+                edge.kind = TravelEdge::Kind::Taxi;
+                edge.staging = fm->pos;
+                edge.dest = WorldPosition(toNode->map_id, toNode->x, toNode->y, toNode->z, 0.0f);
+                edge.team = team;
+                edge.taxiFrom = from;
+                edge.taxiTo = to;
+                add(edge);
+            }
+        }
+
+    for (TransportRoute const& route : transportRoutes)
+        for (TransportStop const& board : route.stops)
+            for (TransportStop const& land : route.stops)
+            {
+                if (&board == &land)
+                    continue;
+
+                TravelEdge edge;
+                edge.kind = TravelEdge::Kind::Ferry;
+                edge.staging = board.pos;
+                edge.dest = land.pos;
+                edge.transportEntry = route.entry;
+                edge.zeppelin = route.isZeppelin;
+                add(edge);
+            }
+
+    LOG_INFO("playerbots", "Playerbots: {} portal / taxi / ferry link(s) between travel regions.", travelEdges.size());
+}
+
+bool TravelMgr::NextTravelEdge(Player* bot, WorldPosition const& goal, TravelEdge& out) const
+{
+    if (!bot)
+        return false;
+
+    uint32 const from =
+        GetTravelRegion(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+    uint32 const to = GetTravelRegion(goal);
+    if (from == to)
+        return false;
+
+    auto usable = [&](TravelEdge const& e)
+    {
+        if (e.team != TEAM_NEUTRAL && e.team != bot->GetTeamId())
+            return false;
+
+        if (e.minLevel && bot->GetLevel() < e.minLevel)
+            return false;
+
+        if (e.kind == TravelEdge::Kind::Ferry &&
+            (!sPlayerbotAIConfig.smartTravelUseTransports ||
+             (e.zeppelin && !sPlayerbotAIConfig.smartTravelUseZeppelins)))
+            return false;
+
+        return e.toRegion == from || RegionSuitable(bot, e.toRegion);
+    };
+
+    // Hops left to the goal region, by a breadth-first search backwards from it.
+    std::unordered_map<uint32, uint32> hops;
+    hops[to] = 0;
+    std::vector<uint32> frontier{ to };
+    while (!frontier.empty())
+    {
+        std::vector<uint32> next;
+        for (uint32 const region : frontier)
+            for (TravelEdge const& e : travelEdges)
+            {
+                if (e.toRegion != region || hops.count(e.fromRegion) || !usable(e))
+                    continue;
+
+                hops[e.fromRegion] = hops[region] + 1;
+                next.push_back(e.fromRegion);
+            }
+
+        frontier.swap(next);
+    }
+
+    auto const self = hops.find(from);
+    if (self == hops.end())
+        return false;
+
+    // Every step out of our region on a shortest chain is equal in hops. Take the nearest one; on
+    // the final hop prefer the exit closest to the goal; and between a hippogryph and a boat
+    // going the same way, fly - a crossing by sea is minutes of waiting.
+    TravelEdge const* best = nullptr;
+    float bestScore = std::numeric_limits<float>::max();
+    for (TravelEdge const& e : travelEdges)
+    {
+        if (e.fromRegion != from || !usable(e))
+            continue;
+
+        auto const h = hops.find(e.toRegion);
+        if (h == hops.end() || h->second + 1 != self->second)
+            continue;
+
+        float score = bot->GetExactDist2d(e.staging.GetPositionX(), e.staging.GetPositionY());
+        if (e.toRegion == to)
+            score += goal.GetExactDist2d(e.dest.GetPositionX(), e.dest.GetPositionY());
+        if (e.kind == TravelEdge::Kind::Ferry)
+            score += 1500.0f;
+
+        if (score < bestScore)
+        {
+            bestScore = score;
+            best = &e;
+        }
+    }
+
+    if (!best)
+        return false;
+
+    out = *best;
     return true;
 }
 
@@ -4820,32 +5193,188 @@ bool TravelMgr::IsTransportParked(Transport* transport)
 
 bool TravelMgr::FindDeckSpot(Transport* transport, Player* bot, WorldPosition& out) const
 {
-    Map* map = bot ? bot->GetMap() : nullptr;
-    if (!transport || !map)
+    if (!transport || !bot || !transport->m_model)
         return false;
 
     float const ox = transport->GetPositionX();
     float const oy = transport->GetPositionY();
     float const oz = transport->GetPositionZ();
+    float const top = oz + 40.0f;
     uint32 const phase = bot->GetPhaseMask();
 
-    // Sweep outward and upward from the model origin: the first point the collision reports as
-    // belonging to this transport is a spot the bot can legally stand on.
-    for (float dz = 2.0f; dz <= 24.0f; dz += 3.0f)
-        for (float r = 0.0f; r <= 24.0f; r += 4.0f)
-            for (uint8 a = 0; a < 8; ++a)
-            {
-                float const ang = static_cast<float>(a) * static_cast<float>(M_PI) / 4.0f;
-                float const x = ox + std::cos(ang) * r;
-                float const y = oy + std::sin(ang) * r;
-                float const z = oz + dz;
+    // Cast straight down onto the hull model on a grid and record the topmost surface at each
+    // sample. Casting against the model itself (not GetTransportForPos, which only answers
+    // yes/no) gives the real surface height, so the bot lands ON the deck instead of inside it.
+    struct Hit
+    {
+        float x, y, z, r;
+    };
+    std::vector<Hit> hits;
+    for (float dx = -24.0f; dx <= 24.0f; dx += 3.0f)
+        for (float dy = -24.0f; dy <= 24.0f; dy += 3.0f)
+        {
+            G3D::Ray const ray(G3D::Vector3(ox + dx, oy + dy, top), G3D::Vector3(0.0f, 0.0f, -1.0f));
+            float dist = 80.0f;
+            if (!transport->m_model->intersectRay(ray, dist, false, phase, VMAP::ModelIgnoreFlags::Nothing))
+                continue;
 
-                if (map->GetTransportForPos(phase, x, y, z, bot) != transport)
+            hits.push_back({ ox + dx, oy + dy, top - dist, std::sqrt(dx * dx + dy * dy) });
+        }
+
+    if (hits.size() < 3)
+        return false;
+
+    // The open deck covers most of the hull seen from above; masts, cabins and rails stand above
+    // it and the flared hull sides fall below it. The median surface height is therefore the deck.
+    std::vector<float> zs;
+    zs.reserve(hits.size());
+    for (Hit const& h : hits)
+        zs.push_back(h.z);
+    std::nth_element(zs.begin(), zs.begin() + zs.size() / 2, zs.end());
+    float const deckZ = zs[zs.size() / 2];
+
+    // Every deck-level sample away from the mast is a valid place to stand. Pick one at random,
+    // skipping spots already taken by other passengers, so a group of bots spreads over the deck
+    // instead of piling onto one point.
+    std::vector<Hit const*> openSpots;
+    for (Hit const& h : hits)
+    {
+        if (std::fabs(h.z - deckZ) > 0.75f || h.r < 3.0f)
+            continue;
+
+        bool taken = false;
+        for (WorldObject const* passenger : transport->GetPassengers())
+        {
+            if (passenger && passenger != bot && passenger->GetExactDist2d(h.x, h.y) < 2.0f)
+            {
+                taken = true;
+                break;
+            }
+        }
+
+        if (!taken)
+            openSpots.push_back(&h);
+    }
+
+    if (openSpots.empty())
+        return false;
+
+    Hit const* pick = openSpots[urand(0, static_cast<uint32>(openSpots.size()) - 1)];
+    out = WorldPosition(transport->GetMapId(), pick->x, pick->y, pick->z + 0.5f, bot->GetOrientation());
+    return true;
+}
+
+namespace
+{
+    // Dry, standable ground around (cx, cy): not in the water and not part of `exclude` (the ship).
+    // Returns candidates scored by distance to `nearPos`; the caller picks among the closest band so
+    // several bots end up side by side rather than on top of each other.
+    struct GroundSpot
+    {
+        float x, y, z, score;
+    };
+
+    std::vector<GroundSpot> SampleDryGround(Player* bot, Transport* exclude, float cx, float cy, float cz,
+                                            float minR, float maxR, WorldPosition const& nearPos)
+    {
+        std::vector<GroundSpot> spots;
+        Map* map = bot->GetMap();
+        if (!map)
+            return spots;
+
+        uint32 const phase = bot->GetPhaseMask();
+        for (float r = minR; r <= maxR; r += 3.0f)
+            for (uint8 a = 0; a < 32; ++a)
+            {
+                float const ang = static_cast<float>(a) * 2.0f * static_cast<float>(M_PI) / 32.0f;
+                float const x = cx + std::cos(ang) * r;
+                float const y = cy + std::sin(ang) * r;
+
+                float const groundZ = map->GetHeight(phase, x, y, cz + 30.0f, true, 60.0f);
+                if (groundZ <= INVALID_HEIGHT)
                     continue;
 
-                out = WorldPosition(transport->GetMapId(), x, y, z, bot->GetOrientation());
-                return true;
+                if (map->IsInWater(phase, x, y, groundZ, bot->GetCollisionHeight()))
+                    continue;
+
+                if (exclude && map->GetTransportForPos(phase, x, y, groundZ, bot) == exclude)
+                    continue;
+
+                spots.push_back({ x, y, groundZ, nearPos.GetExactDist2d(x, y) });
             }
+
+        return spots;
+    }
+
+    // Random spot among those within `band` yards of the best score.
+    bool PickSpreadSpot(std::vector<GroundSpot> const& spots, float band, uint32 mapId, float o, WorldPosition& out)
+    {
+        if (spots.empty())
+            return false;
+
+        float best = std::numeric_limits<float>::max();
+        for (GroundSpot const& g : spots)
+            best = std::min(best, g.score);
+
+        std::vector<GroundSpot const*> pool;
+        for (GroundSpot const& g : spots)
+            if (g.score <= best + band)
+                pool.push_back(&g);
+
+        GroundSpot const* pick = pool[urand(0, static_cast<uint32>(pool.size()) - 1)];
+        out = WorldPosition(mapId, pick->x, pick->y, pick->z + 0.5f, o);
+        return true;
+    }
+}
+
+bool TravelMgr::FindPierSpot(Transport* transport, Player* bot, WorldPosition const& nearPos, WorldPosition& out) const
+{
+    if (!transport || !bot || !bot->GetMap())
+        return false;
+
+    std::vector<GroundSpot> const spots = SampleDryGround(bot, transport, transport->GetPositionX(),
+                                                          transport->GetPositionY(), transport->GetPositionZ(),
+                                                          15.0f, 60.0f, nearPos);
+    return PickSpreadSpot(spots, 10.0f, bot->GetMapId(), bot->GetOrientation(), out);
+}
+
+bool TravelMgr::FindDockWaitSpot(Player* bot, WorldPosition const& dock, WorldPosition& out) const
+{
+    if (!bot || !bot->GetMap() || bot->GetMapId() != dock.GetMapId())
+        return false;
+
+    // The dock stop is where the hull parks, over the water; the passengers wait on the pier
+    // beside it. Spread along the nearest band of dry ground instead of one fixed point.
+    std::vector<GroundSpot> spots = SampleDryGround(bot, nullptr, dock.GetPositionX(), dock.GetPositionY(),
+                                                    dock.GetPositionZ(), 6.0f, 45.0f, dock);
+    if (spots.empty())
+        return false;
+
+    float best = std::numeric_limits<float>::max();
+    for (GroundSpot const& g : spots)
+        best = std::min(best, g.score);
+
+    std::vector<GroundSpot> pool;
+    for (GroundSpot const& g : spots)
+        if (g.score <= best + 12.0f)
+            pool.push_back(g);
+
+    // Random order, and only accept a spot the bot can actually walk to - a patch of dry ground
+    // on the neighbouring jetty is no good to stand on.
+    for (uint8 tries = 0; tries < 6 && !pool.empty(); ++tries)
+    {
+        uint32 const idx = urand(0, static_cast<uint32>(pool.size()) - 1);
+        GroundSpot const g = pool[idx];
+        pool.erase(pool.begin() + idx);
+
+        PathGenerator path(bot);
+        path.CalculatePath(g.x, g.y, g.z);
+        if (path.GetPathType() & (PATHFIND_NOPATH | PATHFIND_SHORTCUT | PATHFIND_NOT_USING_PATH))
+            continue;
+
+        out = WorldPosition(dock.GetMapId(), g.x, g.y, g.z + 0.5f, bot->GetOrientation());
+        return true;
+    }
 
     return false;
 }
@@ -4864,7 +5393,9 @@ bool TravelMgr::SelectRandomFerryLeg(Player* bot, float maxDockDist, TransportLe
 
         for (TransportStop const& board : route.stops)
         {
-            if (board.mapId != bot->GetMapId())
+            if (board.mapId != bot->GetMapId() ||
+                GetTravelRegion(board.pos) !=
+                    GetTravelRegion(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()))
                 continue;
 
             if (bot->GetExactDist2d(board.pos.GetPositionX(), board.pos.GetPositionY()) > maxDockDist)
@@ -4872,7 +5403,8 @@ bool TravelMgr::SelectRandomFerryLeg(Player* bot, float maxDockDist, TransportLe
 
             for (TransportStop const& land : route.stops)
             {
-                if (land.mapId == board.mapId || !FerryDestinationSuitable(bot, land.mapId))
+                uint32 const landRegion = GetTravelRegion(land.pos);
+                if (landRegion == GetTravelRegion(board.pos) || !RegionSuitable(bot, landRegion))
                     continue;
 
                 TransportLeg leg;
@@ -4889,59 +5421,6 @@ bool TravelMgr::SelectRandomFerryLeg(Player* bot, float maxDockDist, TransportLe
 
     out = candidates[urand(0, static_cast<uint32>(candidates.size()) - 1)];
     return true;
-}
-
-bool TravelMgr::FindTransportLeg(Player* bot, WorldPosition const& goal, TransportLeg& out) const
-{
-    if (!bot || bot->GetMapId() == goal.GetMapId())
-        return false;
-
-    bool found = false;
-    float bestScore = std::numeric_limits<float>::max();
-
-    for (TransportRoute const& route : transportRoutes)
-    {
-        if (route.isZeppelin && !sPlayerbotAIConfig.smartTravelUseZeppelins)
-            continue;
-
-        TransportStop const* board = nullptr;
-        TransportStop const* land = nullptr;
-        float boardDist = std::numeric_limits<float>::max();
-        float landDist = std::numeric_limits<float>::max();
-
-        for (TransportStop const& stop : route.stops)
-        {
-            if (stop.mapId == bot->GetMapId())
-            {
-                float const d = bot->GetExactDist2d(stop.pos.GetPositionX(), stop.pos.GetPositionY());
-                if (d < boardDist)
-                {
-                    boardDist = d;
-                    board = &stop;
-                }
-            }
-            else if (stop.mapId == goal.GetMapId())
-            {
-                float const d = goal.GetExactDist2d(stop.pos.GetPositionX(), stop.pos.GetPositionY());
-                if (d < landDist)
-                {
-                    landDist = d;
-                    land = &stop;
-                }
-            }
-        }
-
-        if (!board || !land || landDist >= bestScore)
-            continue;
-
-        bestScore = landDist;
-        found = true;
-        out.entry = route.entry;
-        out.board = *board;
-        out.land = *land;
-    }
-
-    return found;
 }
 
 const std::vector<WorldLocation> TravelMgr::GetTeleportLocations(Player* bot)

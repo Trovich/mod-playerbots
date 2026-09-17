@@ -68,6 +68,9 @@ struct NewRpgInfo
         WorldPosition landPos{};   // where it docks on the far map (get off here)
         uint32 waitSinceMs{0};     // when we reached the pier / boarded; 0 = still walking
         bool aboard{false};
+        WorldPosition deckPos{};   // deck spot we hopped to; attach once the hop has landed
+        WorldPosition waitPos{};   // this bot's own spot on the pier, so waiting bots do not stack
+        bool waitPosTried{false};  // looked for one already (the search is a few hundred height probes)
     };
     // RPG_REST
     struct Rest

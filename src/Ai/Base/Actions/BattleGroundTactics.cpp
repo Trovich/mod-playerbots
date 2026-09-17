@@ -50,6 +50,19 @@ Position const WS_FLAG_HIDE_ALLIANCE_3 = {1495.807f, 1466.774f, 352.350f, 1.50f}
 Position const WS_ROAM_POS = {1227.446f, 1476.235f, 307.484f, 1.50f};
 Position const WS_GY_CAMPING_HORDE = {1039.819, 1388.759f, 340.703f, 0.0f};
 Position const WS_GY_CAMPING_ALLIANCE = {1422.320f, 1551.978f, 342.834f, 0.0f};
+// Flag room posts of the flag defenders, a few yards in front of each flag.
+std::vector<Position> const WS_DEFEND_POS_ALLIANCE = {
+    {1533.2f, 1478.9f, 352.0f, 3.14f}, {1533.2f, 1484.6f, 352.0f, 3.14f}, {1530.0f, 1481.8f, 352.0f, 3.14f}};
+std::vector<Position> const WS_DEFEND_POS_HORDE = {
+    {922.0f, 1431.1f, 345.9f, 0.0f}, {922.0f, 1436.8f, 345.9f, 0.0f}, {925.0f, 1433.9f, 345.9f, 0.0f}};
+// Ambush posts on the roof over each flag room (where the "Tunnel to Base Roof" paths end), for the other team.
+std::vector<Position> const WS_AMBUSH_POS_ALLIANCE_BASE = {
+    {1500.63f, 1472.89f, 373.85f, 0.0f}, {1499.37f, 1489.02f, 373.85f, 0.0f}, {1492.61f, 1494.72f, 373.85f, 0.0f}};
+std::vector<Position> const WS_AMBUSH_POS_HORDE_BASE = {
+    {952.708f, 1445.01f, 367.67f, 3.14f}, {952.778f, 1433.0f, 367.66f, 3.14f}, {956.338f, 1425.09f, 367.87f, 3.14f}};
+// How long an ambush lasts, and how often the team sends one out.
+uint32 const WS_AMBUSH_PERIOD = 150 * IN_MILLISECONDS;
+uint32 const WS_AMBUSH_CHANCE = 40;
 std::vector<Position> const WS_FLAG_HIDE_HORDE = {WS_FLAG_HIDE_HORDE_1, WS_FLAG_HIDE_HORDE_2, WS_FLAG_HIDE_HORDE_3};
 std::vector<Position> const WS_FLAG_HIDE_ALLIANCE = {WS_FLAG_HIDE_ALLIANCE_1, WS_FLAG_HIDE_ALLIANCE_2,
                                                      WS_FLAG_HIDE_ALLIANCE_3};
@@ -58,6 +71,8 @@ Position const AB_WAITING_POS_HORDE = {702.884f, 703.045f, -16.115f, 0.77f};
 Position const AB_WAITING_POS_ALLIANCE = {1286.054f, 1282.500f, -15.697f, 3.95f};
 Position const AB_GY_CAMPING_HORDE = {723.513f, 725.924f, -28.265f, 3.99f};
 Position const AB_GY_CAMPING_ALLIANCE = {1262.627f, 1256.341f, -27.289f, 0.64f};
+// How far from the flag the bots holding a base stand.
+float const AB_GUARD_DISTANCE = 6.0f;
 
 // the captains aren't the actual creatures but invisible trigger creatures - they still have correct death state and
 // location (unless they move)
@@ -1429,6 +1444,245 @@ std::string const BGTactics::HandleConsoleCommandPrivate(WorldSession* session, 
     return "usage: showpath(=[num]) / showcreature=[num] / showobject=[num]";
 }
 
+// Same result for the same input on every call and on every bot: lets a team split up duties without any shared
+// state, each bot working out the same lists and finding its own place in them.
+static uint32 StableHash(uint64 value, uint64 salt)
+{
+    uint64 h = value ^ (salt * 0x9E3779B97F4A7C15ULL);
+    h ^= h >> 33;
+    h *= 0xFF51AFD7ED558CCDULL;
+    h ^= h >> 33;
+    h *= 0xC4CEB9FE1A85EC53ULL;
+    h ^= h >> 33;
+    return uint32(h);
+}
+
+static bool IsTeamRealPlayer(Player* player)
+{
+    return IsRealPlayer(player) || IsSelfBot(player);
+}
+
+// The bots of a team that follow the battleground tactics (not a player's own bots following their master).
+std::vector<Player*> BGTactics::getTeamBots(Battleground* bg, TeamId teamId)
+{
+    std::vector<Player*> bots;
+    for (auto const& [guid, player] : bg->GetPlayers())
+    {
+        if (!player || !player->IsInWorld() || player->GetMap() != bot->GetMap() || player->GetTeamId() != teamId)
+            continue;
+
+        if (IsTeamRealPlayer(player))
+            continue;
+
+        PlayerbotAI* playerAI = GET_PLAYERBOT_AI(player);
+        if (!playerAI || !playerAI->HasStrategy("battleground", BOT_STATE_NON_COMBAT))
+            continue;
+
+        bots.push_back(player);
+    }
+
+    return bots;
+}
+
+// Arathi Basin: a few bots stay at every base the team holds or is taking (or has just had assaulted), instead of
+// the whole team moving on to the next flag and leaving the last one to the first enemy who walks by. Bots already
+// holding a base keep it (their "bg guard" position), the gaps are filled by the nearest bots without a base,
+// threatened bases first; a third of the team always stays free to attack.
+// Returns false if this bot has no base to hold, otherwise the base and the bot's place among its guards.
+bool BGTactics::abGuardDuty(BattlegroundAB* ab, uint8 strategy, uint8& guardNode, uint32& slot, uint32& slots)
+{
+    PositionMap& ownPosMap = context->GetValue<PositionMap&>("position")->Get();
+    auto const releaseGuard = [&ownPosMap]()
+    {
+        auto itr = ownPosMap.find("bg guard");
+        if (itr != ownPosMap.end())
+            itr->second.Reset();
+        return false;
+    };
+
+    TeamId const team = bot->GetTeamId();
+    TeamId const enemyTeam = Battleground::GetOtherTeamId(team);
+    bool const alliance = team == TEAM_ALLIANCE;
+    uint8 const ownOccupied = alliance ? BG_AB_NODE_STATE_ALLY_OCCUPIED : BG_AB_NODE_STATE_HORDE_OCCUPIED;
+    uint8 const ownContested = alliance ? BG_AB_NODE_STATE_ALLY_CONTESTED : BG_AB_NODE_STATE_HORDE_CONTESTED;
+    uint8 const enemyContested = alliance ? BG_AB_NODE_STATE_HORDE_CONTESTED : BG_AB_NODE_STATE_ALLY_CONTESTED;
+
+    auto const nodePosition = [](uint8 node)
+    {
+        return Position(BG_AB_NodePositions[node][0], BG_AB_NodePositions[node][1], BG_AB_NodePositions[node][2]);
+    };
+
+    struct NodeNeed
+    {
+        uint8 node;
+        uint32 need;
+        bool threatened;
+    };
+
+    std::vector<NodeNeed> needs;
+    for (uint8 node = 0; node < BG_AB_DYNAMIC_NODES_COUNT; ++node)
+    {
+        CaptureABPointInfo const& info = ab->GetCapturePointInfo(node);
+        // contested by the enemy after having been captured: the enemy is assaulting a base we held
+        bool const assaulted = info._state == enemyContested && info._captured;
+        if (info._state != ownOccupied && info._state != ownContested && !assaulted)
+            continue;
+
+        bool const threatened = assaulted || getPlayersInArea(enemyTeam, nodePosition(node), 50.0f) > 0;
+        uint32 const need = (strategy == AB_STRATEGY_DEFENSIVE ? 3 : 2) + (threatened ? 1 : 0);
+        needs.push_back({node, need, threatened});
+    }
+
+    if (needs.empty())
+        return releaseGuard();
+
+    std::vector<Player*> const bots = getTeamBots(ab, team);
+    uint32 const perNodeCap = static_cast<uint32>((bots.size() - bots.size() / 3) / needs.size());
+
+    for (NodeNeed& need : needs)
+    {
+        need.need = std::min(need.need, perNodeCap);
+
+        // players standing at the flag count as guards
+        uint32 players = 0;
+        for (auto const& [guid, player] : ab->GetPlayers())
+            if (player && player->IsInWorld() && player->IsAlive() && player->GetTeamId() == team &&
+                IsTeamRealPlayer(player) && player->GetExactDist2d(nodePosition(need.node)) < 20.0f)
+                ++players;
+
+        need.need = need.need > players ? need.need - players : 0;
+    }
+
+    std::stable_sort(needs.begin(), needs.end(),
+                     [](NodeNeed const& a, NodeNeed const& b) { return a.threatened && !b.threatened; });
+
+    // the base each bot holds at the moment, -1 for none
+    std::vector<int32> guarded(bots.size(), -1);
+    for (size_t i = 0; i < bots.size(); ++i)
+    {
+        PositionMap& posMap =
+            GET_PLAYERBOT_AI(bots[i])->GetAiObjectContext()->GetValue<PositionMap&>("position")->Get();
+        auto itr = posMap.find("bg guard");
+        if (itr == posMap.end() || !itr->second.valueSet)
+            continue;
+
+        for (uint8 node = 0; node < BG_AB_DYNAMIC_NODES_COUNT; ++node)
+            if (nodePosition(node).GetExactDist2d(itr->second.x, itr->second.y) < 1.0f)
+                guarded[i] = node;
+    }
+
+    std::vector<bool> assigned(bots.size(), false);
+    for (NodeNeed const& need : needs)
+    {
+        if (!need.need)
+            continue;
+
+        Position const nodePos = nodePosition(need.node);
+        std::vector<size_t> candidates;
+        for (size_t i = 0; i < bots.size(); ++i)
+            if (!assigned[i])
+                candidates.push_back(i);
+
+        // its own guards first (in a fixed order, so that they keep their places), then bots without a base by
+        // distance, and only then the guards of other bases
+        auto const rankGroup = [&](size_t i) { return guarded[i] == need.node ? 0 : (guarded[i] < 0 ? 1 : 2); };
+        std::sort(candidates.begin(), candidates.end(), [&](size_t a, size_t b)
+        {
+            int const groupA = rankGroup(a);
+            int const groupB = rankGroup(b);
+            if (groupA != groupB)
+                return groupA < groupB;
+
+            if (!groupA)
+                return bots[a]->GetGUID() < bots[b]->GetGUID();
+
+            return bots[a]->GetExactDist2dSq(nodePos) < bots[b]->GetExactDist2dSq(nodePos);
+        });
+
+        uint32 const count = std::min<uint32>(need.need, candidates.size());
+        for (uint32 i = 0; i < count; ++i)
+        {
+            assigned[candidates[i]] = true;
+            if (bots[candidates[i]] != bot)
+                continue;
+
+            guardNode = need.node;
+            slot = i;
+            slots = count;
+            ownPosMap["bg guard"] = PositionInfo(nodePos.GetPositionX(), nodePos.GetPositionY(),
+                                                 nodePos.GetPositionZ(), bot->GetMapId());
+            return true;
+        }
+    }
+
+    return releaseGuard();
+}
+
+// Warsong Gulch: one or two bots of the team stay in their flag room for the whole game, and during some periods
+// two or three others (rogues and druids first, never healers) lie in wait on the roof over the enemy flag room.
+// Same approach as abGuardDuty(), except that the lists are fixed by a hash of the guids instead of positions.
+BGTactics::WSDuty BGTactics::wsDuty(BattlegroundWS* ws, uint32& slot)
+{
+    TeamId const team = bot->GetTeamId();
+    // our flag carrier has more important things to do
+    if (ws->GetFlagPickerGUID(Battleground::GetOtherTeamId(team)) == bot->GetGUID())
+        return WSDuty::NONE;
+
+    std::vector<Player*> bots = getTeamBots(ws, team);
+    uint32 const instance = ws->GetInstanceID();
+    std::sort(bots.begin(), bots.end(), [instance](Player* a, Player* b)
+    {
+        return StableHash(a->GetGUID().GetRawValue(), instance) < StableHash(b->GetGUID().GetRawValue(), instance);
+    });
+
+    WSBotStrategy const strategy = static_cast<WSBotStrategy>(GetBotStrategyForTeam(ws, team));
+    uint32 const defenders = std::min<uint32>(strategy == WS_STRATEGY_OFFENSIVE ? 1 : 2, bots.size() / 4);
+    for (uint32 i = 0; i < defenders; ++i)
+    {
+        if (bots[i] == bot)
+        {
+            slot = i;
+            return WSDuty::FLAG_DEFENDER;
+        }
+    }
+
+    uint32 const period = ws->GetStartTime() / WS_AMBUSH_PERIOD;
+    uint32 const periodRoll = StableHash((uint64(instance) << 1) | uint64(team), period);
+    if (periodRoll % 100 >= WS_AMBUSH_CHANCE)
+        return WSDuty::NONE;
+
+    std::vector<Player*> rest(bots.begin() + defenders, bots.end());
+    uint32 const squad = std::min<uint32>(2 + (periodRoll / 100) % 2, rest.size() / 2);
+    auto const suitability = [](Player* player)
+    {
+        if (PlayerbotAI::IsHeal(player))
+            return 2;
+
+        return player->getClass() == CLASS_ROGUE || player->getClass() == CLASS_DRUID ? 0 : 1;
+    };
+
+    std::sort(rest.begin(), rest.end(), [&](Player* a, Player* b)
+    {
+        int const suitA = suitability(a);
+        int const suitB = suitability(b);
+        if (suitA != suitB)
+            return suitA < suitB;
+
+        return StableHash(a->GetGUID().GetRawValue(), period) < StableHash(b->GetGUID().GetRawValue(), period);
+    });
+
+    for (uint32 i = 0; i < squad; ++i)
+    {
+        if (rest[i] == bot && suitability(bot) < 2)
+        {
+            slot = i;
+            return WSDuty::AMBUSHER;
+        }
+    }
+
+    return WSDuty::NONE;
+}
+
 // Depends on OnBattlegroundStart in playerbots.cpp
 uint8 BGTactics::GetBotStrategyForTeam(Battleground* bg, TeamId teamId)
 {
@@ -2210,9 +2464,46 @@ bool BGTactics::selectObjective(bool reset)
             uint8 allianceScore = bg->GetTeamScore(TEAM_ALLIANCE);
             uint8 hordeScore = bg->GetTeamScore(TEAM_HORDE);
 
+            BattlegroundWS* ws = static_cast<BattlegroundWS*>(bg);
+            uint32 dutySlot = 0;
+            WSDuty const duty = hasFlag ? WSDuty::NONE : wsDuty(ws, dutySlot);
+
             // Check if both teams currently have the flag
             bool bothFlagsTaken = enemyFC && teamFC;
-            if (!hasFlag && bothFlagsTaken)
+            if (duty == WSDuty::FLAG_DEFENDER)
+            {
+                // our flag is out: get it back, wherever it went; otherwise stay by it
+                if (enemyFC)
+                    target.Relocate(enemyFC->GetPositionX(), enemyFC->GetPositionY(), enemyFC->GetPositionZ());
+                else
+                {
+                    std::vector<Position> const& posts =
+                        team == TEAM_ALLIANCE ? WS_DEFEND_POS_ALLIANCE : WS_DEFEND_POS_HORDE;
+                    target.Relocate(posts[dutySlot % posts.size()]);
+                }
+            }
+            else if (duty == WSDuty::AMBUSHER)
+            {
+                TeamId const enemyTeam = Battleground::GetOtherTeamId(team);
+                Position const& enemyFlagPos = team == TEAM_ALLIANCE ? WS_FLAG_POS_HORDE : WS_FLAG_POS_ALLIANCE;
+                std::vector<Position> const& posts =
+                    team == TEAM_ALLIANCE ? WS_AMBUSH_POS_HORDE_BASE : WS_AMBUSH_POS_ALLIANCE_BASE;
+
+                if (enemyFC && enemyFC->GetExactDist2d(enemyFlagPos) < 80.0f)
+                {
+                    // what we have been waiting for: their carrier is home with our flag
+                    target.Relocate(enemyFC->GetPositionX(), enemyFC->GetPositionY(), enemyFC->GetPositionZ());
+                }
+                else if (!teamFC && ws->GetFlagState(enemyTeam) == BG_WS_FLAG_STATE_ON_BASE &&
+                         !getPlayersInArea(enemyTeam, enemyFlagPos, 30.0f))
+                {
+                    // nobody minds their flag: take it
+                    target.Relocate(enemyFlagPos);
+                }
+                else
+                    target.Relocate(posts[dutySlot % posts.size()]);
+            }
+            else if (!hasFlag && bothFlagsTaken)
             {
                 // If both flags taken: Bots have 20% chance to support own flag carrier, otherwise attack enemy FC
                 if (urand(0, 99) < 20 && teamFC)
@@ -2336,6 +2627,34 @@ bool BGTactics::selectObjective(bool reset)
             bool isSilly = urand(0, 99) < 20;
 
             BgObjective = nullptr;
+
+            // --- PRIORITY 0: Hold a base the team has taken or is taking
+            uint8 guardNode = 0;
+            uint32 guardSlot = 0;
+            uint32 guardSlots = 0;
+            if (abGuardDuty(ab, strategy, guardNode, guardSlot, guardSlots))
+            {
+                Position post(BG_AB_NodePositions[guardNode][0], BG_AB_NodePositions[guardNode][1],
+                              BG_AB_NodePositions[guardNode][2]);
+                uint8 const enemyContested =
+                    team == TEAM_ALLIANCE ? BG_AB_NODE_STATE_HORDE_CONTESTED : BG_AB_NODE_STATE_ALLY_CONTESTED;
+                if (ab->GetCapturePointInfo(guardNode)._state == enemyContested)
+                {
+                    // the enemy has put its banner up: stand at the flag, "check flag" takes it back
+                    post = bot->GetRandomPoint(post, 3.0f);
+                }
+                else
+                {
+                    // spread around the flag
+                    float const angle =
+                        BG_AB_NodePositions[guardNode][3] + guardSlot * 2.0f * static_cast<float>(M_PI) / guardSlots;
+                    bot->MovePositionToFirstCollision(post, AB_GUARD_DISTANCE, angle - bot->GetOrientation());
+                }
+
+                pos.Set(post.GetPositionX(), post.GetPositionY(), post.GetPositionZ(), bot->GetMapId());
+                posMap["bg objective"] = pos;
+                return true;
+            }
 
             // --- PRIORITY 1: Nearby enemy (rare aggressive impulse)
             if (urand(0, 99) < 5)
@@ -4007,6 +4326,15 @@ bool BGTactics::protectFC()
     {
         return false;
     }
+
+    // flag defenders and ambushers keep their posts
+    BattlegroundTypeId bgType = bg->GetBgTypeID();
+    if (bgType == BATTLEGROUND_RB)
+        bgType = bg->GetBgTypeID(true);
+
+    uint32 dutySlot = 0;
+    if (bgType == BATTLEGROUND_WS && wsDuty(static_cast<BattlegroundWS*>(bg), dutySlot) != WSDuty::NONE)
+        return false;
 
     if (!bot->IsInCombat() && !bot->IsWithinDistInMap(teamFC, 20.0f))
     {

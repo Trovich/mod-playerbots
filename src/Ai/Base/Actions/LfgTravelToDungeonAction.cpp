@@ -80,10 +80,14 @@ bool LfgTravelToDungeonTrigger::IsActive()
     if (bot->IsBeingTeleported() || bot->GetVehicle())
         return false;
 
-    // Bots that have a human to follow (master or real group leader) are driven by
-    // FollowTravelAction instead, which redirects its goal to the dungeon entrance. This
-    // trigger only covers fully bot-led LFG groups.
-    if (FollowTravelAnchor(botAI, bot))
+    // Bots whose long trips "follow travel" already drives are handled there - it aims at the dungeon entrance
+    // whether or not there is a human to follow. This trigger only covers bots outside its reach (no follow
+    // strategy, or told to stay put), so the two never fight over the shared travel state.
+    if (FollowTravelCovers(botAI))
+        return false;
+
+    // Told to hold position: the same respect "follow travel" pays to "stay".
+    if (botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT))
         return false;
 
     FollowTravelState& st = AI_VALUE(FollowTravelState&, "follow travel state");
@@ -114,7 +118,7 @@ bool LfgTravelToDungeonAction::isUseful()
     if (bot->GetTransport() && (st.phase == FollowTravelPhase::Aboard || st.phase == FollowTravelPhase::ToDock))
         return true;
 
-    return !FollowTravelAnchor(botAI, bot) && LfgWalkToDungeonApplicable(bot);
+    return !FollowTravelCovers(botAI) && LfgWalkToDungeonApplicable(bot);
 }
 
 bool LfgTravelToDungeonAction::Execute(Event /*event*/)

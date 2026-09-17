@@ -12,6 +12,9 @@
 
 class ChatHandler;
 class Battleground;
+class BattlegroundAB;
+class BattlegroundWS;
+class Player;
 class PlayerbotAI;
 struct Position;
 
@@ -114,7 +117,17 @@ public:
     bool Execute(Event event) override;
 
 private:
+    enum class WSDuty : uint8
+    {
+        NONE,
+        FLAG_DEFENDER,  // stays in the own flag room
+        AMBUSHER        // lies in wait on the roof over the enemy flag room
+    };
+
     static std::string const HandleConsoleCommandPrivate(WorldSession* session, char const* args);
+    std::vector<Player*> getTeamBots(Battleground* bg, TeamId teamId);
+    bool abGuardDuty(BattlegroundAB* ab, uint8 strategy, uint8& guardNode, uint32& slot, uint32& slots);
+    WSDuty wsDuty(BattlegroundWS* ws, uint32& slot);
     bool moveToStart(bool force = false);
     bool selectObjective(bool reset = false);
     bool moveToObjective(bool ignoreDist);

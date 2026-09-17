@@ -43,6 +43,10 @@ public:
     // Snapshot of what we are travelling toward (master position, or the dungeon entrance).
     WorldPosition goal;
 
+    // Where the goal was when the current plan was made: a master who has since moved to another region, or far
+    // enough away, invalidates the legs we are walking.
+    WorldPosition planGoal;
+
     // Set when `goal` is an LFG dungeon entrance; `dungeonInside` is the instance-side start.
     bool goalIsDungeon = false;
     WorldPosition dungeonInside;
@@ -70,15 +74,23 @@ public:
     WorldPosition dockPos;       // where it docks on our map (board here)
     WorldPosition landPos;       // where it docks on the goal's map (get off here)
     uint32 dockWaitSinceMs = 0;  // when we started waiting at the dock; 0 = not waiting yet
+    WorldPosition deckPos;       // deck spot we hopped to; attach as passenger once the hop lands
+    WorldPosition waitPos;       // this bot's own spot on the pier, so waiting bots do not stack
+    bool waitPosTried = false;   // looked for one already (the search is a few hundred height probes)
 
     // Portal leg.
     WorldPosition portalStaging;
     uint32 portalDestMap = 0;
     WorldPosition portalDestPos;
 
-    // Continuous-swim tracking: the forward-cone sampler in TravelFarTo happily finds water
-    // steps, which is how a bot ends up crossing a whole lake under the terrain.
+    // Continuous-swim tracking: a stepping stone across water looks walkable to the navmesh, which is how a bot
+    // ends up crossing a whole lake - or an ocean - under the terrain.
     uint32 swimSinceMs = 0;
+
+    // Final-approach dead end: the closest point we found that is actually walkable, and how many
+    // times we re-aimed at it. Teleporting the remainder is only allowed from there.
+    WorldPosition approachPos;
+    uint8 approachTries = 0;
 
     // Stuck / give-up tracking.
     WorldPosition moveFarPos;
@@ -86,6 +98,18 @@ public:
     uint32 stuckSinceMs = 0;
     uint32 stuckAttempts = 0;
     uint32 giveUpAtMs = 0;
+
+    // Walking legs of this plan that stalled; the next stall hops the bot to the leg's travel point.
+    uint8 legFails = 0;
+
+    // TravelFarTo is following a complete navmesh route (which may lead away for a while) rather than a guess.
+    bool onRoute = false;
+
+    // No stepping stone found last tick: the next search (a couple of dozen path queries) waits until then.
+    uint32 nextStepSearchMs = 0;
+
+    // The human we travel toward is loading into a new place since then; 0 = not waiting.
+    uint32 pendingSinceMs = 0;
 };
 
 class FollowTravelStateValue : public ManualSetValue<FollowTravelState&>

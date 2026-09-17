@@ -4,6 +4,7 @@
  */
 
 #include "PlayerbotAI.h"
+#include "FollowTravelStateValue.h"
 #include "AiFactory.h"
 #include "BudgetValues.h"
 #include "ChannelMgr.h"
@@ -383,15 +384,46 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     if (!nextTransportCheck)
     {
         nextTransportCheck = 1000;
-        Transport* newTransport = bot->GetMap()->GetTransportForPos(bot->GetPhaseMask(), bot->GetPositionX(),
-                                                                    bot->GetPositionY(), bot->GetPositionZ(), bot);
 
-        if (newTransport != bot->GetTransport())
+        // Leftovers of a transport the bot is not really riding (see TravelMgr::DetachFromTransport) turn every
+        // later spline into a transport-space one: the bot snaps to the map origin, or walks through terrain.
+        if (TravelMgr::HasStaleTransportLink(bot))
+        {
+            LOG_INFO("playerbots", "Bot {} had a stale transport link on map {} ({:.0f},{:.0f}) - cleared",
+                     bot->GetName(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY());
+            TravelMgr::DetachFromTransport(bot);
+            bot->StopMovingOnCurrentPos();
+        }
+
+        Transport* current = bot->GetTransport();
+        Transport* newTransport = current;
+        if (!bot->IsBeingTeleported())
+            newTransport = bot->GetMap()->GetTransportForPos(bot->GetPhaseMask(), bot->GetPositionX(),
+                                                            bot->GetPositionY(), bot->GetPositionZ(), bot);
+
+        // The deck probe misses now and then on a ship under way (the collision model trails the hull by an update).
+        // Never drop a listed passenger that is still on top of its ship - leaving is the travel code's call, and a
+        // bot dropped mid-crossing falls into the sea.
+        if (current && !newTransport && current->ToMotionTransport() && bot->GetExactDist2d(current) < 80.0f)
+            newTransport = current;
+
+        // A bot on its way aboard boards itself: it hops onto the deck first and only then attaches, because
+        // AddPassenger records the offset from wherever the bot stands. Attaching it here, while it still waits on
+        // the pier, is what used to drag bots through the air beside the hull.
+        if (!current && newTransport && newTransport->ToMotionTransport() && aiObjectContext)
+        {
+            FollowTravelState const& travel =
+                aiObjectContext->GetValue<FollowTravelState&>("follow travel state")->Get();
+            if (travel.phase == FollowTravelPhase::ToDock || rpgInfo.GetStatus() == RPG_TRAVEL_FERRY)
+                newTransport = current;
+        }
+
+        if (newTransport != current)
         {
             LOG_DEBUG("playerbots", "Bot {} is on a transport", bot->GetName());
 
-            if (bot->GetTransport())
-                bot->GetTransport()->RemovePassenger(bot, true);
+            if (current)
+                TravelMgr::DetachFromTransport(bot);
 
             if (newTransport)
                 newTransport->AddPassenger(bot, true);
@@ -804,6 +836,10 @@ void PlayerbotAI::HandleTeleportAck()
 
         // reset AI state after teleport
         Reset(true);
+        {
+            FollowTravelState& travel = aiObjectContext->GetValue<FollowTravelState&>("follow travel state")->Get();
+            travel.ResetLeg(travel.moveFarPos);
+        }
 
         // clear movement only AFTER teleport is finalized and bot is in world
         if (bot->IsInWorld() && bot->GetMotionMaster())
@@ -836,6 +872,14 @@ void PlayerbotAI::HandleTeleportAck()
         p << uint32(0);  // time
 
         bot->GetSession()->HandleMoveTeleportAck(p);
+
+        // Progress measured before the hop is meaningless after it: a bot moved away from its
+        // travel target would otherwise look "stuck" at once and fire the teleport recovery.
+        rpgInfo.SetMoveFarTo(rpgInfo.moveFarPos);
+        {
+            FollowTravelState& travel = aiObjectContext->GetValue<FollowTravelState&>("follow travel state")->Get();
+            travel.ResetLeg(travel.moveFarPos);
+        }
 
         // clear movement after successful relocation
         if (bot->GetMotionMaster())

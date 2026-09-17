@@ -5,6 +5,7 @@
  */
 
 #include "UseMeetingStoneAction.h"
+#include "FollowTravelStateValue.h"
 #include "CellImpl.h"
 #include "Event.h"
 #include "GridNotifiers.h"
@@ -237,6 +238,11 @@ bool SummonAction::Teleport(Player* summoner, Player* player, bool preserveAuras
                     player->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED |
                                                           AURA_INTERRUPT_FLAG_CHANGE_MAP);
                 player->TeleportTo(mapId, x, y, z, 0);
+
+                // Being summoned means "be here now": drop whatever trip or roaming goal the bot had,
+                // or it heads straight back to it (and, with stale stuck counters, teleports there).
+                botAI->rpgInfo.ChangeToIdle();
+                AI_VALUE(FollowTravelState&, "follow travel state").Clear();
                 if (player->GetPet())
                     player->GetPet()->NearTeleportTo(x, y, z, player->GetOrientation());
                 if (player->GetGuardianPet())

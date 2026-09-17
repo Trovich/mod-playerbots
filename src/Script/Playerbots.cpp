@@ -107,9 +107,26 @@ public:
         }
     }
 
-    bool OnPlayerBeforeTeleport(Player* /*player*/, uint32 /*mapid*/, float /*x*/, float /*y*/, float /*z*/,
-                                float /*orientation*/, uint32 /*options*/, Unit* /*target*/) override
+    bool OnPlayerBeforeTeleport(Player* player, uint32 mapid, float x, float y, float z, float /*orientation*/,
+                                uint32 options, Unit* /*target*/) override
     {
+        // Diagnostics for the two teleports that used to strand bots: one aimed at the map origin (a spline laid out
+        // in transport space leaking into world coordinates) and one starting from a transport link the bot should
+        // no longer carry. Both are rare, so info level is quiet on a healthy server.
+        if (player && GET_PLAYERBOT_AI(player))
+        {
+            bool const nearOrigin = std::fabs(x) < 300.0f && std::fabs(y) < 300.0f;
+            bool const onTransport = player->GetTransport() != nullptr;
+            bool const flagged = player->HasUnitMovementFlag(MOVEMENTFLAG_ONTRANSPORT);
+            if (nearOrigin || onTransport || flagged)
+                LOG_INFO("playerbots",
+                         "[Teleport] {}: map {} ({:.0f},{:.0f},{:.0f}) -> map {} ({:.0f},{:.0f},{:.0f}),"
+                         " options {}{}{}",
+                         player->GetName(), player->GetMapId(), player->GetPositionX(), player->GetPositionY(),
+                         player->GetPositionZ(), mapid, x, y, z, options, onTransport ? ", on a transport" : "",
+                         flagged ? ", flagged on a transport" : "");
+        }
+
         /* for now commmented out until proven its actually required
         * havent seen any proof CleanVisibilityReferences() is needed
 

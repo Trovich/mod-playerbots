@@ -733,9 +733,11 @@ AiPlayerbot.SmartTravelFreeFare = 1
 # running straight through them (best-effort; PathGenerator-validated). 1 - on, 0 - off.
 AiPlayerbot.SmartTravelAvoidEnemies = 1
 
-# Last resort: teleport a grouped bot to its leader when the leader is on another map that
-# has no road route to it (no taxi link across the water, no portal hub within reach), so
-# the bot is not stranded forever. 0 = the bot just gives up instead. 1 - on, 0 - off.
+# Allow a travelling bot to hop the part of the road it cannot walk. It never teleports to the
+# goal from afar: it hops to the next travel point on its own route - the flight master, the
+# portal, the pier it kept failing to reach on foot - or, when it already stands at the closest
+# reachable point, over the last few yards (see SmartTravelTeleportNearDist). 0 = it gives up and
+# retries later instead. 1 - on, 0 - off.
 AiPlayerbot.SmartTravelTeleportFallback = 1
 
 # Keep a mid-trip bot running toward its goal after it aggroes trash on the way, instead of
@@ -747,11 +749,11 @@ AiPlayerbot.SmartTravelRunPastEnemies = 1
 # the combat AI (fight / flee / heal) take over.
 AiPlayerbot.SmartTravelCombatMinHealth = 50
 
-# On the goal's own map, only walk the last stretch on the navmesh when it is within this many
-# yards AND actually navmesh-connected. Farther, or across an unlinked landmass on the same map
-# (e.g. Bloodmyst Isle and Hellfire Peninsula are both map 530), the bot uses the teleport
-# fallback instead of beelining across terrain / the ocean floor. Yards.
-AiPlayerbot.SmartTravelMaxWalkDist = 2000
+# A bot only hops the rest of the way to its travel goal when it already stands at the closest point
+# it can walk to, and the goal is within this many yards of that point (a dungeon door up a wall, a
+# ledge the navmesh does not reach). Farther out it never teleports: it retries the leg, then gives
+# up. Yards. Default: 100
+AiPlayerbot.SmartTravelTeleportNearDist = 100
 
 # Let bots ride boats and zeppelins across continents instead of falling back to a teleport.
 # The bot walks to the harbour, waits for the ferry, steps aboard and gets off at the far dock;
@@ -766,9 +768,10 @@ AiPlayerbot.SmartTravelUseZeppelins = 0
 # A full ferry loop is several minutes, so keep this generous. Milliseconds.
 AiPlayerbot.SmartTravelDockWaitMs = 600000
 
-# Reject taxi routes longer than this many hops. Long cross-world flight relays run into gappy
-# DBC taxi data and can strand the bot mid-air with a dead flight spline; such routes fall back
-# to a portal hop / walk / teleport instead.
+# Reject taxi routes longer than this many hops. Routes are planned over the bot's own faction
+# network (shortest by flight length, never through ship routes, other continents or flavour
+# nodes), but a very long relay is still a lot of flying: such routes fall back to a portal hop,
+# a ferry or the road instead.
 AiPlayerbot.SmartTravelMaxTaxiHops = 6
 
 # When the core setting DungeonFinder.SkipTeleport is enabled, player bots in an LFG group
