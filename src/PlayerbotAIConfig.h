@@ -73,7 +73,9 @@ enum NewRpgStatus : int
     RPG_OUTDOOR_PVP = 8,
     // Ride a boat / zeppelin to another continent, the slow way a player would
     RPG_TRAVEL_FERRY = 9,
-    RPG_STATUS_END = 10
+    // A stealth class sneaks into a foreign capital, picks a fight with the guards, and lets the chips fall
+    RPG_INFILTRATE = 10,
+    RPG_STATUS_END = 11
 };
 
 #define MAX_SPECNO 20
@@ -505,6 +507,16 @@ public:
     float rpgFerryMaxDockDist;
     // player bots travel to the dungeon entrance on foot when DungeonFinder.SkipTeleport is on
     bool lfgWalkToDungeon;
+
+    // minimum level for the RPG_INFILTRATE tactic (a rogue or druid sneaking into a foreign capital); the RPG
+    // weight above controls how often an eligible bot picks it
+    uint32 infiltrateMinLevel;
+    uint32 infiltrateMaxDeaths;
+
+    // a flying-mounted bot climbs to a cruising altitude for a long leg instead of hugging the terrain in a
+    // straight line to a (near-)ground-level destination; it still comes down on its own for the final approach
+    bool flyMountCruiseAltitude;
+    float flyMountCruiseMaxHeight;
 
     std::string const GetTimestampStr();
     bool hasLog(std::string const fileName)

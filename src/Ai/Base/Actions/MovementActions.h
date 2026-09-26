@@ -57,6 +57,8 @@ protected:
     void ClearIdleState();
     void UpdateMovementState();
     bool MoveAway(Unit* target, float distance = sPlayerbotAIConfig.fleeDistance, bool backwards = false);
+    // Same as MoveAway, but heading along a given world angle (radians) instead of directly away from one unit.
+    bool MoveAwayAlongAngle(float initAngle, float distance, bool backwards = false);
     bool MoveFromGroup(float distance);
     bool Move(float angle, float distance);
     bool MoveInside(uint32 mapId, float x, float y, float z, float distance = sPlayerbotAIConfig.followDistance,
@@ -81,6 +83,13 @@ private:
                                                   bool normal_only = false, float step = 8.0f);
     bool wasMovementRestricted = false;
     void DoMovePoint(Unit* unit, float x, float y, float z, bool generatePath, bool backwards);
+
+    // A flying-mounted bot's destination is normally handed to us at (near) ground level - a quest giver, a grind
+    // spot, a waypoint on a walked route - so a plain MoveTo would fly it in a straight line hugging the terrain.
+    // For a leg long enough to be worth climbing for, raise z to a cruising altitude above the higher of the bot's
+    // own position and the destination; short hops and any point already above that altitude are left untouched,
+    // so the bot still climbs out, cruises, and comes back down for the final approach on its own.
+    float ApplyFlightCruiseAltitude(float x, float y, float z) const;
 };
 
 class FleeAction : public MovementAction
@@ -92,6 +101,12 @@ public:
 
     bool Execute(Event event) override;
     bool isUseful() override;
+
+private:
+    // Hostile units that are on the bot (attacking it or targeting it), plus the unit it started fleeing from
+    std::vector<Unit*> GetFleeThreats(Unit* primary);
+    // World angle to run along: away from the threats, bent toward the nearest ally that is out of harm's way
+    float GetFleeAngle(std::vector<Unit*> const& threats);
 };
 
 class FleeWithPetAction : public MovementAction

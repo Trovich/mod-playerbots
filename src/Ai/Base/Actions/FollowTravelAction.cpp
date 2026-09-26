@@ -45,6 +45,8 @@ namespace
     constexpr float TAXI_WORTH_DIS = 700.0f;   // same-region trips longer than this consider a flight
     constexpr float FLIGHT_MAX_WALK = 1500.0f;     // walk at most this far to a flight master
     constexpr float FLIGHT_OVERHEAD_DIS = 300.0f;  // take-off, landing and detours: a flight must beat walking by this
+    constexpr float FLIGHT_ROUND_TRIP_DIS = 300.0f;  // a taxi landing this close to where we stand buys nothing
+    constexpr float GRID_PRELOAD_DIS = 1600.0f;    // load the navmesh tiles of a walking leg up to this long
     constexpr float REPLAN_MOVE_DIS = 400.0f;      // the goal moved this far (or 30% of the way) => plan again
     constexpr float REPLAN_OTHER_MAP_DIS = 1500.0f;  // ...or this far while it is still on another map
     constexpr float DOCK_ARRIVE_DIS = 25.0f;   // "standing at the dock", and "close enough to step off"
@@ -239,6 +241,35 @@ namespace
         return points.back();
     }
 
+    // Detour can only route through map tiles that are loaded, and tiles load with the grids around players. A leg
+    // of a few hundred yards therefore often has no route at all - the bot has to walk most of it blindly, which is
+    // how bots crept along the Hellfire Citadel wall instead of running round it to the Blood Furnace door. Load the
+    // handful of grids the leg crosses up front; they hold only what a player walking there would load anyway.
+    void PreloadRouteGrids(Player* bot, WorldPosition const& dest)
+    {
+        Map* map = bot->GetMap();
+        if (!map || bot->GetMapId() != dest.GetMapId())
+            return;
+
+        float const dx = dest.GetPositionX() - bot->GetPositionX();
+        float const dy = dest.GetPositionY() - bot->GetPositionY();
+        float const dist = std::sqrt(dx * dx + dy * dy);
+        if (dist < 1.0f || dist > GRID_PRELOAD_DIS)
+            return;
+
+        uint32 const steps = static_cast<uint32>(dist / (SIZE_OF_GRIDS * 0.5f)) + 1;
+        for (uint32 i = 0; i <= steps; ++i)
+        {
+            float const t = static_cast<float>(i) / static_cast<float>(steps);
+            float const x = bot->GetPositionX() + dx * t;
+            float const y = bot->GetPositionY() + dy * t;
+            if (!Acore::IsValidMapCoord(x, y) || map->IsGridLoaded(x, y))
+                continue;
+
+            map->LoadGrid(x, y);
+        }
+    }
+
     // The next waypoint toward `dest`, at most WALK_STEP_DIS along a real navmesh route.
     //
     // 1. A route to the destination itself. A complete one is trusted even where it first leads away (round a wall,
@@ -246,7 +277,8 @@ namespace
     // 2. Otherwise - the destination's tile is not loaded yet, or it sits off the mesh - aim at points toward it
     //    inside the loaded area and take the route that ends nearest the destination, detours penalised. The old
     //    random cone sampler happily walked bots out of the back gate of a keep and away from the goal.
-    bool NextRouteStep(Player* bot, WorldPosition const& dest, WorldPosition& out, bool& onRoute)
+    bool NextRouteStep(Player* bot, WorldPosition const& dest, WorldPosition& out, bool& onRoute,
+                       float& routeLength)
     {
         float const distToDest = bot->GetExactDist(dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
 
@@ -266,6 +298,7 @@ namespace
                     G3D::Vector3 const step = PointAlong(points, WALK_STEP_DIS);
                     out = WorldPosition(bot->GetMapId(), step.x, step.y, step.z);
                     onRoute = complete;
+                    routeLength = length;  // only meaningful for a complete route: what is left of the way
                     return true;
                 }
             }
@@ -324,6 +357,7 @@ namespace
         }
 
         onRoute = false;
+        routeLength = 0.0f;
         return found;
     }
 
@@ -427,7 +461,13 @@ namespace
         for (ObjectGuid const& guid : hostiles)
         {
             Unit* h = botAI->GetUnit(guid);
-            if (!h || !h->IsAlive() || h->IsInCombat())
+            if (!h || !h->IsAlive())
+                continue;
+
+            // An idle one is what the bot rounds to keep it idle. One already fighting is not in the way - it
+            // leashes once outrun - unless it is held where it stands (the root the bot left behind): the route
+            // runs right past it and it still swings at anything within reach.
+            if (h->IsInCombat() && !h->HasRootAura())
                 continue;
 
             float const hx = h->GetPositionX() - bx;
@@ -463,6 +503,24 @@ bool FollowTravelCovers(PlayerbotAI* botAI)
 {
     return sPlayerbotAIConfig.groupSmartTravel && botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT) &&
            !botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT);
+}
+
+bool IsSmartTravelling(PlayerbotAI* botAI)
+{
+    FollowTravelState const& st =
+        botAI->GetAiObjectContext()->GetValue<FollowTravelState&>("follow travel state")->Get();
+    if (st.phase == FollowTravelPhase::None)
+        return false;
+
+    // A walking trip nobody has stepped (no progress) for its whole give-up window is dead, not paused: StepTravel
+    // would abandon it on its next tick. Its state can outlive it - a bot that fell out of a trip driven from
+    // outside the combat engine keeps the phase it had - and must not keep the bot from grinding or fleeing.
+    // Riding a taxi or a ferry has no such clock.
+    if (st.phase != FollowTravelPhase::InFlight && st.phase != FollowTravelPhase::ToDock &&
+        st.phase != FollowTravelPhase::Aboard && st.giveUpAtMs && getMSTime() > st.giveUpAtMs)
+        return false;
+
+    return true;
 }
 
 // While a trip is in progress, decide whether the bot should keep running through combat it
@@ -704,6 +762,14 @@ bool FollowTravelAction::PlanFlight(FollowTravelState& st, WorldPosition const& 
     if (plan.walkDist + plan.landDist + FLIGHT_OVERHEAD_DIS >= directDist)
         return false;
 
+    // ...and never a round trip. The only node near a stuck bot is often the one it just flew into (Honor Hold for
+    // the Hellfire Citadel doors); flying back to it would loop for ever.
+    if (bot->GetExactDist2d(plan.arrival.GetPositionX(), plan.arrival.GetPositionY()) < FLIGHT_ROUND_TRIP_DIS)
+    {
+        LOG_DEBUG("playerbots", "[FollowTravel] {}: rejecting a taxi that lands where it took off", bot->GetName());
+        return false;
+    }
+
     if (!TaxiChainFlyable(plan.nodes))
     {
         LOG_DEBUG("playerbots", "[FollowTravel] {}: rejecting {}-node taxi chain with a DBC gap", bot->GetName(),
@@ -758,17 +824,29 @@ bool FollowTravelAction::PlanLink(FollowTravelState& st, TravelMgr::TravelEdge c
         }
         case TravelMgr::TravelEdge::Kind::Portal:
         {
-            if (toStaging > FLY_TO_LINK_DIS && PlanFlight(st, edge.staging, toStaging))
+            // A same-region shortcut - a capital's own portal to the foot of the Dark Portal is the standing
+            // example - can get the bot to this edge's staging point far faster than the region graph (which
+            // only models hops that cross a region boundary) can see. Take it first; landing near `edge.staging`
+            // is all that matters, StepTravel re-plans fresh from there and picks up the real edge with a tiny
+            // remaining distance.
+            TravelMgr::TravelEdge shortcut;
+            bool const haveShortcut = sTravelMgr.FindApproachShortcut(bot, edge.staging, shortcut);
+            TravelMgr::TravelEdge const& use = haveShortcut ? shortcut : edge;
+            float const toUseStaging = haveShortcut
+                                           ? bot->GetExactDist2d(use.staging.GetPositionX(), use.staging.GetPositionY())
+                                           : toStaging;
+
+            if (toUseStaging > FLY_TO_LINK_DIS && PlanFlight(st, use.staging, toUseStaging))
                 return true;
 
-            st.portalStaging = edge.staging;
-            st.portalDestMap = edge.dest.GetMapId();
-            st.portalDestPos = edge.dest;
+            st.portalStaging = use.staging;
+            st.portalDestMap = use.dest.GetMapId();
+            st.portalDestPos = use.dest;
             st.phase = FollowTravelPhase::ToPortal;
             st.ResetLeg(st.portalStaging);
-            LOG_DEBUG("playerbots", "[FollowTravel] {}: portal link {} -> {} at ({:.0f},{:.0f}), {:.0f}y away",
-                      bot->GetName(), edge.fromRegion, edge.toRegion, edge.staging.GetPositionX(),
-                      edge.staging.GetPositionY(), toStaging);
+            LOG_DEBUG("playerbots", "[FollowTravel] {}: portal link {} -> {} at ({:.0f},{:.0f}), {:.0f}y away{}",
+                      bot->GetName(), edge.fromRegion, edge.toRegion, use.staging.GetPositionX(),
+                      use.staging.GetPositionY(), toUseStaging, haveShortcut ? " (same-region shortcut)" : "");
             return true;
         }
         case TravelMgr::TravelEdge::Kind::Ferry:
@@ -1105,8 +1183,9 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
                 // stop itself is over the water) and wait for the next one.
                 st.deckPos = WorldPosition();
                 WorldPosition const& back = st.waitPos ? st.waitPos : st.dockPos;
-                bot->NearTeleportTo(back.GetPositionX(), back.GetPositionY(), back.GetPositionZ(),
-                                    bot->GetOrientation());
+                if (back)
+                    bot->NearTeleportTo(back.GetPositionX(), back.GetPositionY(), back.GetPositionZ(),
+                                        bot->GetOrientation());
                 return true;
             }
 
@@ -1133,10 +1212,16 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
                 if (TravelFarTo(st, st.dockPos))
                     return true;
 
-                // The dock key frame is out over the water: hop to dry ground on the pier beside it.
+                // The dock key frame itself is out over the water - a hop to it would drop the bot into the sea.
+                // Only dry ground on the pier beside it will do; without that, give up and try again later.
                 WorldPosition pier;
                 if (!sTravelMgr.FindDockWaitSpot(bot, st.dockPos, pier))
-                    pier = st.dockPos;
+                {
+                    LOG_DEBUG("playerbots", "[FollowTravel] {}: cannot reach ferry dock and found no pier - giving up",
+                              bot->GetName());
+                    return false;
+                }
+
                 return LegStalled(st, pier, "ferry dock");
             }
 
@@ -1337,7 +1422,10 @@ bool FollowTravelAction::TravelFarTo(FollowTravelState& st, WorldPosition const&
         return false;
 
     if (dest != st.moveFarPos)
+    {
         st.ResetLeg(dest);
+        PreloadRouteGrids(bot, dest);
+    }
 
     if (IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL))
         return true;
@@ -1375,9 +1463,36 @@ bool FollowTravelAction::TravelFarTo(FollowTravelState& st, WorldPosition const&
     float const distToDest =
         bot->GetExactDist(dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
 
-    if (distToDest + 5.0f < st.nearestMoveFarDis)
+    // The last search found nothing walkable: wait a moment before burning another fan of path queries, but keep
+    // the leg's own clock running so a bot that never finds a step still gives up.
+    if (st.nextStepSearchMs && now < st.nextStepSearchMs)
     {
-        st.nearestMoveFarDis = distToDest;
+        if (++st.stuckAttempts >= 5 && st.stuckSinceMs != 0 && GetMSTimeDiffToNow(st.stuckSinceMs) >= LEG_STUCK_MS)
+            return false;
+
+        return true;
+    }
+
+    // Pick the next step first: whether it follows a complete route decides how progress is measured. On a route
+    // that is the route's remaining length - a real way round an obstacle leads away from the target for a while
+    // and must not read as "going nowhere" - otherwise the straight-line distance.
+    WorldPosition step;
+    bool onRoute = false;
+    float routeLength = 0.0f;
+    bool const haveStep =
+        distToDest >= PATHFINDER_DIS && NextRouteStep(bot, dest, step, onRoute, routeLength);
+    bool const routeMetric = haveStep && onRoute;
+    float const progress = routeMetric ? routeLength : distToDest;
+
+    if (routeMetric != st.progressIsRoute)
+    {
+        // The two metrics are not comparable: start measuring again, without crediting this tick as progress.
+        st.progressIsRoute = routeMetric;
+        st.nearestMoveFarDis = progress;
+    }
+    else if (progress + 5.0f < st.nearestMoveFarDis)
+    {
+        st.nearestMoveFarDis = progress;
         st.stuckSinceMs = now;
         st.stuckAttempts = 0;
         st.giveUpAtMs = now + GIVE_UP_MS;  // real progress keeps the plan alive, however long the road
@@ -1387,8 +1502,9 @@ bool FollowTravelAction::TravelFarTo(FollowTravelState& st, WorldPosition const&
         return false;  // no meaningful progress - the leg stalled
     }
 
-    // A complete route may lead away for a while; a guess that carries the bot this far off does not get to.
-    if (!st.onRoute && st.nearestMoveFarDis < FLT_MAX && distToDest > st.nearestMoveFarDis + REGRESS_DIS)
+    // A guess that carries the bot this far off is a dead end; a complete route is trusted wherever it leads.
+    if (!routeMetric && !st.progressIsRoute && st.nearestMoveFarDis < FLT_MAX &&
+        distToDest > st.nearestMoveFarDis + REGRESS_DIS)
     {
         LOG_DEBUG("playerbots", "[FollowTravel] {}: drifted {:.0f}y away from ({:.0f},{:.0f}) - leg stalled",
                   bot->GetName(), distToDest - st.nearestMoveFarDis, dest.GetPositionX(), dest.GetPositionY());
@@ -1403,19 +1519,13 @@ bool FollowTravelAction::TravelFarTo(FollowTravelState& st, WorldPosition const&
         return true;
     }
 
-    if (st.nextStepSearchMs && now < st.nextStepSearchMs)
-        return true;
-
-    WorldPosition step;
-    bool onRoute = false;
-    if (!NextRouteStep(bot, dest, step, onRoute))
+    if (!haveStep)
     {
         st.nextStepSearchMs = now + STEP_SEARCH_RETRY_MS;
         return true;  // nothing usable this tick, but not declared stuck yet
     }
 
     st.nextStepSearchMs = 0;
-    st.onRoute = onRoute;
     WorldPosition wp = AvoidHostiles(botAI, bot, step.GetPositionX(), step.GetPositionY(), step.GetPositionZ());
     MoveTo(bot->GetMapId(), wp.GetPositionX(), wp.GetPositionY(), wp.GetPositionZ(), false, false, false, true);
     return true;

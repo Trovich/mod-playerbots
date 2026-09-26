@@ -42,10 +42,11 @@ void FollowTravelState::Clear()
     stuckAttempts = 0;
     giveUpAtMs = 0;
     legFails = 0;
-    onRoute = false;
+    progressIsRoute = false;
     nextStepSearchMs = 0;
     pendingSinceMs = 0;
     nextMountPokeMs = 0;
+    disabledEnemies.clear();
 }
 
 void FollowTravelState::ResetLeg(WorldPosition const& legTarget)
@@ -55,6 +56,6 @@ void FollowTravelState::ResetLeg(WorldPosition const& legTarget)
     swimSinceMs = 0;
     stuckSinceMs = 0;
     stuckAttempts = 0;
-    onRoute = false;
+    progressIsRoute = false;
     nextStepSearchMs = 0;
 }

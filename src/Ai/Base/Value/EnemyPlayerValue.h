@@ -11,6 +11,7 @@
 #include "PossibleTargetsValue.h"
 #include "TargetValue.h"
 
+class Player;
 class PlayerbotAI;
 class Unit;
 
@@ -37,7 +38,16 @@ public:
     Unit* Calculate() override;
 
 private:
+    Unit* SelectTarget();
+    // Team play: goes for whoever is healing the enemy being fought, or else the enemy casters, instead of
+    // `fallback` (what SelectTarget() found)
+    Unit* PreferSupportTarget(Unit* fallback);
+    bool IsHealing(Player* healer, Unit* target);
     float GetMaxAttackDistance();
+
+    // last support pick, held for a few seconds so that the bots do not flip between two targets
+    ObjectGuid supportGuid;
+    uint32 supportUntilMs = 0;
 };
 
 #endif

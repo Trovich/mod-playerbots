@@ -150,6 +150,7 @@ public:
 
         creators["panic"] = &TriggerContext::panic;
         creators["outnumbered"] = &TriggerContext::outnumbered;
+        creators["fleeing"] = &TriggerContext::fleeing;
         creators["behind target"] = &TriggerContext::behind_target;
         creators["not behind target"] = &TriggerContext::not_behind_target;
         creators["not facing target"] = &TriggerContext::not_facing_target;
@@ -249,6 +250,7 @@ public:
         creators["travel flight status"] = &TriggerContext::travel_flight_status;
         creators["travel ferry status"] = &TriggerContext::travel_ferry_status;
         creators["outdoor pvp status"] = &TriggerContext::outdoor_pvp_status;
+        creators["infiltrate status"] = &TriggerContext::infiltrate_status;
         creators["can self resurrect"] = &TriggerContext::can_self_resurrect;
         creators["can fish"] = &TriggerContext::can_fish;
         creators["can use fishing bobber"] = &TriggerContext::can_use_fishing_bobber;
@@ -311,6 +313,7 @@ private:
     static Trigger* not_facing_target(PlayerbotAI* botAI) { return new IsNotFacingTargetTrigger(botAI); }
     static Trigger* panic(PlayerbotAI* botAI) { return new PanicTrigger(botAI); }
     static Trigger* outnumbered(PlayerbotAI* botAI) { return new OutNumberedTrigger(botAI); }
+    static Trigger* fleeing(PlayerbotAI* botAI) { return new FleeingTrigger(botAI); }
     static Trigger* no_drink(PlayerbotAI* botAI) { return new NoDrinkTrigger(botAI); }
     static Trigger* no_food(PlayerbotAI* botAI) { return new NoFoodTrigger(botAI); }
     static Trigger* LightAoe(PlayerbotAI* botAI) { return new LightAoeTrigger(botAI); }
@@ -467,6 +470,7 @@ private:
     static Trigger* travel_flight_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_TRAVEL_FLIGHT); }
     static Trigger* travel_ferry_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_TRAVEL_FERRY); }
     static Trigger* outdoor_pvp_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_OUTDOOR_PVP); }
+    static Trigger* infiltrate_status(PlayerbotAI* botAI) { return new NewRpgStatusTrigger(botAI, RPG_INFILTRATE); }
     static Trigger* can_self_resurrect(PlayerbotAI* ai) { return new SelfResurrectTrigger(ai); }
     static Trigger* can_fish(PlayerbotAI* ai) { return new CanFishTrigger(ai); }
     static Trigger* can_use_fishing_bobber(PlayerbotAI* ai) { return new CanUseFishingBobberTrigger(ai); }

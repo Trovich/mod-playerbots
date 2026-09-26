@@ -47,6 +47,7 @@
 #include "MoveToTravelTargetAction.h"
 #include "MovementActions.h"
 #include "NewRpgAction.h"
+#include "NewRpgInfiltrateAction.h"
 #include "NewRpgOutdoorPvP.h"
 #include "NonCombatActions.h"
 #include "OutfitAction.h"
@@ -283,6 +284,7 @@ public:
         creators["new rpg travel flight"] = &ActionContext::new_rpg_travel_flight;
         creators["new rpg travel ferry"] = &ActionContext::new_rpg_travel_ferry;
         creators["new rpg outdoor pvp"] = &ActionContext::new_rpg_outdoor_pvp;
+        creators["new rpg infiltrate"] = &ActionContext::new_rpg_infiltrate;
         creators["wait for attack keep safe distance"] = &ActionContext::wait_for_attack_keep_safe_distance;
     }
 
@@ -493,6 +495,7 @@ private:
     static Action* new_rpg_travel_flight(PlayerbotAI* ai) { return new NewRpgTravelFlightAction(ai); }
     static Action* new_rpg_travel_ferry(PlayerbotAI* ai) { return new NewRpgTravelFerryAction(ai); }
     static Action* new_rpg_outdoor_pvp(PlayerbotAI* ai) { return new NewRpgOutdoorPvpAction(ai); }
+    static Action* new_rpg_infiltrate(PlayerbotAI* ai) { return new NewRpgInfiltrateAction(ai); }
     static Action* wait_for_attack_keep_safe_distance(PlayerbotAI* ai) { return new WaitForAttackKeepSafeDistanceAction(ai); }
 };
 

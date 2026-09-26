@@ -8,6 +8,7 @@
 #include "Corpse.h"
 #include "Event.h"
 #include "FleeManager.h"
+#include "FollowTravelAction.h"
 #include "GameObject.h"
 #include "LastMovementValue.h"
 #include "LootObjectStack.h"
@@ -166,6 +167,34 @@ bool MovementAction::MoveToLOS(WorldObject* target, bool ranged)
     return false;
 }
 
+namespace
+{
+    constexpr float FLY_CRUISE_MIN_DIS = 60.0f;    // shorter hops just fly direct - not worth climbing for
+    constexpr float FLY_CRUISE_BASE_HEIGHT = 15.0f;  // climb at least this high above the higher of the two ends
+    constexpr float FLY_CRUISE_SLOPE = 0.15f;      // ...plus this fraction of the leg's straight-line length
+}
+
+float MovementAction::ApplyFlightCruiseAltitude(float x, float y, float z) const
+{
+    if (!sPlayerbotAIConfig.flyMountCruiseAltitude)
+        return z;
+
+    float const dist2d = bot->GetExactDist2d(x, y);
+    if (dist2d < FLY_CRUISE_MIN_DIS)
+        return z;
+
+    // Ground under the bot and under the destination, each probed near its own current/requested height - the
+    // same query SearchForBestPath already relies on for ground-based movement.
+    float const groundHere = bot->GetMapHeight(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+    float const groundThere = bot->GetMapHeight(x, y, z);
+    if (groundHere <= INVALID_HEIGHT || groundThere <= INVALID_HEIGHT)
+        return z;  // no terrain here (instance without a heightmap, deep underground) - leave z alone
+
+    float const cruise = std::min(sPlayerbotAIConfig.flyMountCruiseMaxHeight,
+                                  FLY_CRUISE_BASE_HEIGHT + dist2d * FLY_CRUISE_SLOPE);
+    return std::max(z, std::max(groundHere, groundThere) + cruise);
+}
+
 bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool /*idle*/, bool /*react*/, bool normal_only,
                             bool exact_waypoint, MovementPriority priority, bool lessDelay, bool backwards)
 {
@@ -174,6 +203,12 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool /*idle
     {
         return false;
     }
+
+    // Climb for the leg before anything below (dedup, delay, generatePath) sees z, so a flying bot is judged and
+    // timed on the point it will actually fly to.
+    if (bot->IsFlying() && mapId == bot->GetMapId())
+        z = ApplyFlightCruiseAltitude(x, y, z);
+
     if (IsDuplicateMove(x, y, z))
     {
         return false;
@@ -1543,7 +1578,11 @@ bool MovementAction::MoveAway(Unit* target, float distance, bool backwards)
     {
         return false;
     }
-    float init_angle = target->GetAngle(bot);
+    return MoveAwayAlongAngle(target->GetAngle(bot), distance, backwards);
+}
+
+bool MovementAction::MoveAwayAlongAngle(float init_angle, float distance, bool backwards)
+{
     for (float delta = 0; delta <= M_PI / 2; delta += M_PI / 8)
     {
         float angle = init_angle + delta;
@@ -1560,7 +1599,7 @@ bool MovementAction::MoveAway(Unit* target, float distance, bool backwards)
             dz = bot->GetPositionZ();
             exact = false;
         }
-        if (MoveTo(target->GetMapId(), dx, dy, dz, false, false, true, exact, MovementPriority::MOVEMENT_COMBAT, false,
+        if (MoveTo(bot->GetMapId(), dx, dy, dz, false, false, true, exact, MovementPriority::MOVEMENT_COMBAT, false,
                    backwards))
         {
             return true;
@@ -1583,7 +1622,7 @@ bool MovementAction::MoveAway(Unit* target, float distance, bool backwards)
             dz = bot->GetPositionZ();
             exact = false;
         }
-        if (MoveTo(target->GetMapId(), dx, dy, dz, false, false, true, exact, MovementPriority::MOVEMENT_COMBAT, false,
+        if (MoveTo(bot->GetMapId(), dx, dy, dz, false, false, true, exact, MovementPriority::MOVEMENT_COMBAT, false,
                    backwards))
         {
             return true;
@@ -1823,21 +1862,276 @@ void MovementAction::DoMovePoint(Unit* unit, float x, float y, float z, bool gen
     }
 }
 
+namespace
+{
+    // How far from every pursuer the bot has to be to call the flee done, and how long it runs at most
+    // when nobody is on its heels any more
+    constexpr float FLEE_SAFE_DISTANCE = 30.0f;
+    constexpr uint32 FLEE_MAX_MS = 10000;
+    // One leg of the run; the next leg is planned when this one ends, from wherever the pursuers are by then
+    constexpr float FLEE_STEP_DISTANCE = 20.0f;
+    // A unit closer than this that is on the bot makes a flee worth starting
+    constexpr float FLEE_START_RANGE = 12.0f;
+    // Beyond this a unit that is on the bot is not chasing it, just looking its way
+    constexpr float FLEE_PURSUIT_RANGE = 40.0f;
+    constexpr float FLEE_THREAT_RANGE = 60.0f;
+
+    // The class's own root / stun / freeze: the distance a flee alone can't buy, and the spell a class that is
+    // close to guaranteed to have learned it. 0 = nothing suitable for this class.
+    uint32 FleeDisableSpellId(Player* bot)
+    {
+        switch (bot->getClass())
+        {
+            case CLASS_MAGE:
+                return 122;    // Frost Nova
+            case CLASS_DRUID:
+                return 339;    // Entangling Roots
+            case CLASS_SHAMAN:
+                return 8056;   // Frost Shock
+            case CLASS_PALADIN:
+                return 853;    // Hammer of Justice
+            case CLASS_ROGUE:
+                return 408;    // Kidney Shot
+            case CLASS_HUNTER:
+                return 19386;  // Wyvern Sting
+            case CLASS_DEATH_KNIGHT:
+                return 45524;  // Chains of Ice
+            default:
+                return 0;
+        }
+    }
+
+    // A smart trip that runs through the combat it picks up (AiPlayerbot.SmartTravelRunPastEnemies) has its own way
+    // out of a fight: keep going to the goal. Running AWAY from the enemy instead is exactly wrong there - the route
+    // leads past it, so the bot ran out, came back on the next leg, got too close again, and fled (and re-rooted)
+    // again, lap after lap.
+    bool FleeYieldsToTravel(PlayerbotAI* botAI, Player* bot)
+    {
+        return IsSmartTravelling(botAI) && TravelRunsThroughCombat(botAI, bot);
+    }
+
+    // On such a trip the flee shrinks to one disable on whoever is on the bot, cast once per enemy per trip: a unit
+    // that is chasing the bot (or about to swing), is within reach and is not held already.
+    bool TripDisableWanted(PlayerbotAI* botAI, Player* bot, Unit* target)
+    {
+        if (!target || !target->IsInWorld() || !target->IsAlive() || target->HasRootAura() || target->HasStunAura())
+            return false;
+
+        if (target->GetVictim() != bot && target->GetTarget() != bot->GetGUID())
+            return false;
+
+        if (!bot->IsWithinMeleeRange(target) && bot->GetExactDist(target) > FLEE_START_RANGE)
+            return false;
+
+        FollowTravelState const& trip =
+            botAI->GetAiObjectContext()->GetValue<FollowTravelState&>("follow travel state")->Get();
+        if (std::find(trip.disabledEnemies.begin(), trip.disabledEnemies.end(), target->GetGUID()) !=
+            trip.disabledEnemies.end())
+            return false;
+
+        uint32 const spellId = FleeDisableSpellId(bot);
+        return spellId && botAI->CanCastSpell(spellId, target);
+    }
+}
+
+std::vector<Unit*> FleeAction::GetFleeThreats(Unit* primary)
+{
+    std::vector<Unit*> threats;
+    auto const add = [&](Unit* unit)
+    {
+        if (!unit || unit == bot || !unit->IsInWorld() || !unit->IsAlive() || unit->GetMapId() != bot->GetMapId() ||
+            !unit->IsHostileTo(bot) || bot->GetExactDist(unit) > FLEE_THREAT_RANGE ||
+            std::find(threats.begin(), threats.end(), unit) != threats.end())
+            return;
+
+        threats.push_back(unit);
+    };
+
+    add(primary);
+    for (Unit* attacker : bot->getAttackers())
+        add(attacker);
+
+    // casters and anyone else who has the bot selected without swinging at it
+    for (ObjectGuid const guid : AI_VALUE(GuidVector, "nearest enemy players"))
+    {
+        Unit* unit = botAI->GetUnit(guid);
+        if (unit && unit->GetTarget() == bot->GetGUID())
+            add(unit);
+    }
+
+    return threats;
+}
+
+float FleeAction::GetFleeAngle(std::vector<Unit*> const& threats)
+{
+    // direction away from the threats, the closer one the more it counts
+    float x = 0.0f;
+    float y = 0.0f;
+    float nearest = FLT_MAX;
+    for (Unit* threat : threats)
+    {
+        float const dist = std::max(bot->GetExactDist(threat), 1.0f);
+        nearest = std::min(nearest, dist);
+        x += std::cos(threat->GetAngle(bot)) / dist;
+        y += std::sin(threat->GetAngle(bot)) / dist;
+    }
+
+    float const away = (x == 0.0f && y == 0.0f) ? bot->GetOrientation() + static_cast<float>(M_PI) : std::atan2(y, x);
+
+    // run toward friends when there are some on the way out: the nearest one that is further from the fight
+    // than the bot is, and no more than a quarter turn off the way straight away
+    Unit* ally = nullptr;
+    float allyDist = 50.0f;
+    for (ObjectGuid const guid : AI_VALUE(GuidVector, "nearest friendly players"))
+    {
+        Unit* unit = botAI->GetUnit(guid);
+        if (!unit || unit == bot || !unit->IsAlive() || unit->GetMapId() != bot->GetMapId())
+            continue;
+
+        float const dist = bot->GetExactDist(unit);
+        if (dist < 8.0f || dist >= allyDist)
+            continue;
+
+        float diff = std::fabs(Position::NormalizeOrientation(bot->GetAngle(unit) - away));
+        if (diff > static_cast<float>(M_PI))
+            diff = 2.0f * static_cast<float>(M_PI) - diff;
+        if (diff > ANGLE_90_DEG)
+            continue;
+
+        bool safer = true;
+        for (Unit* threat : threats)
+            if (threat->GetExactDist(unit) <= std::min(nearest, FLEE_SAFE_DISTANCE))
+                safer = false;
+
+        if (safer)
+        {
+            ally = unit;
+            allyDist = dist;
+        }
+    }
+
+    return ally ? bot->GetAngle(ally) : away;
+}
+
 bool FleeAction::Execute(Event /*event*/)
 {
-    return MoveAway(AI_VALUE(Unit*, "current target"), sPlayerbotAIConfig.fleeDistance, true);
+    LastMovement& lastMove = AI_VALUE(LastMovement&, "last movement");
+    uint32 const now = getMSTime();
+
+    Unit* target = AI_VALUE(Unit*, "current target");
+
+    // Mid-trip: no run, just the one disable, then the trip carries the bot on (see FleeYieldsToTravel). A run that
+    // was under way when the trip picked up the fight ends here.
+    if (FleeYieldsToTravel(botAI, bot))
+    {
+        lastMove.EndFlee();
+
+        if (!TripDisableWanted(botAI, bot, target))
+            return false;
+
+        if (!botAI->CastSpell(FleeDisableSpellId(bot), target))
+            return false;
+
+        AI_VALUE(FollowTravelState&, "follow travel state").disabledEnemies.push_back(target->GetGUID());
+        return true;
+    }
+
+    if (!lastMove.fleeActive)
+    {
+        lastMove.fleeActive = true;
+        lastMove.fleeStartMs = now;
+        lastMove.fleeFromGuid = target ? target->GetGUID() : ObjectGuid::Empty;
+
+        // A stun or root on the way out buys the distance a flee alone can't - try whichever the class
+        // has and is close to guaranteed to have learned; CastSpell already checks range/cooldown/whether
+        // it's even known, so a class with nothing suitable (or one that's on cooldown) just skips this.
+        if (target)
+        {
+            if (uint32 const disableSpellId = FleeDisableSpellId(bot))
+                botAI->CastSpell(disableSpellId, target);
+        }
+    }
+
+    lastMove.fleeLastMs = now;
+
+    Unit* primary = botAI->GetUnit(lastMove.fleeFromGuid);
+    if (!primary)
+        primary = target;
+
+    std::vector<Unit*> const threats = GetFleeThreats(primary);
+    if (threats.empty())
+    {
+        lastMove.EndFlee();
+        return false;
+    }
+
+    // The run is over once nobody is chasing any more and the bot is either clear of them or has been running
+    // long enough. Anyone still coming after it keeps it running, however far or long that takes.
+    float nearest = FLT_MAX;
+    bool pursued = false;
+    for (Unit* threat : threats)
+    {
+        float const dist = bot->GetExactDist(threat);
+        nearest = std::min(nearest, dist);
+
+        bool const onBot = threat->GetVictim() == bot || threat->GetTarget() == bot->GetGUID();
+        if (onBot && dist <= FLEE_PURSUIT_RANGE && (dist < FLEE_SAFE_DISTANCE || threat->isMoving()))
+            pursued = true;
+    }
+
+    if (!pursued && (nearest >= FLEE_SAFE_DISTANCE || now - lastMove.fleeStartMs >= FLEE_MAX_MS))
+    {
+        lastMove.EndFlee();
+        return false;
+    }
+
+    // Rooted, stunned, feared: nothing to run with, the combat AI does what it can meanwhile
+    if (!botAI->CanMove())
+    {
+        lastMove.EndFlee();
+        return false;
+    }
+
+    // Still on the way to the last point: keep the action (returning false would hand the tick to the attack
+    // action, which turns the bot around)
+    if (bot->isMoving() || IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
+        return true;
+
+    // backwards=false: the previous version backpedaled facing the attacker (MOVE_RUN_BACK - slower,
+    // and reads as barely trying), which is what "just backs away, doesn't feel like it's actually
+    // afraid" was about. Turning and sprinting at full MOVE_RUN speed is what "flee" should look like.
+    if (MoveAwayAlongAngle(GetFleeAngle(threats), FLEE_STEP_DISTANCE, false))
+        return true;
+
+    // nowhere to run to
+    lastMove.EndFlee();
+    return false;
 }
 
 bool FleeAction::isUseful()
 {
+    // Mid-trip the flee is only the one disable per enemy; whether there is one to cast decides the tick, so a held
+    // enemy (or a class with no disable) lets the trip's own move go on instead of being pushed aside every tick.
+    if (FleeYieldsToTravel(botAI, bot))
+        return TripDisableWanted(botAI, bot, AI_VALUE(Unit*, "current target"));
+
+    // A run in progress goes on whatever else the bot is up to
+    if (AI_VALUE(LastMovement&, "last movement").fleeActive)
+        return true;
+
     if (bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL) != nullptr)
         return false;
 
+    // Only start running from something that is close: a caster standing off at range is not a reason to turn tail
     Unit* target = AI_VALUE(Unit*, "current target");
-    if (target && target->IsInWorld() && !bot->IsWithinMeleeRange(target))
-        return false;
+    if (target && target->IsInWorld() && bot->IsWithinMeleeRange(target))
+        return true;
 
-    return true;
+    for (Unit* threat : GetFleeThreats(target))
+        if (bot->GetExactDist(threat) <= FLEE_START_RANGE)
+            return true;
+
+    return false;
 }
 
 bool FleeWithPetAction::Execute(Event /*event*/)
@@ -2652,7 +2946,15 @@ bool SetFacingTargetAction::Execute(Event /*event*/)
     return true;
 }
 
-bool SetFacingTargetAction::isUseful() { return !AI_VALUE2(bool, "facing", "current target"); }
+bool SetFacingTargetAction::isUseful()
+{
+    // Running past an enemy on a trip: turning to look at it (this outranks the trip's own move) only makes the bot
+    // twitch its way down the road, and the enemy is never the thing it is heading for.
+    if (bot->isMoving() && IsSmartTravelling(botAI) && TravelRunsThroughCombat(botAI, bot))
+        return false;
+
+    return !AI_VALUE2(bool, "facing", "current target");
+}
 
 bool SetFacingTargetAction::isPossible()
 {

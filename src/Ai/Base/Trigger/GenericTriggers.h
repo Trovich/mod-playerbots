@@ -555,6 +555,12 @@ int8 fleeDecision = 0;
 uint32 fleeEvalMs = 0;
 END_TRIGGER()
 
+// Active for as long as a flee that has started is still under way (see FleeAction), so the run is not
+// re-decided by the panic/outnumbered checks on every tick
+BEGIN_TRIGGER(FleeingTrigger, Trigger)
+std::string const getName() override { return "fleeing"; }
+END_TRIGGER()
+
 class NoPetTrigger : public Trigger
 {
 public:

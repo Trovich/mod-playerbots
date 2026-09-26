@@ -24,6 +24,14 @@ bool TravelRunsThroughCombat(PlayerbotAI* botAI, Player* bot);
 // traveller stands down for such bots so the two never fight over the shared travel state.
 bool FollowTravelCovers(PlayerbotAI* botAI);
 
+// True while the shared long-distance traveller - FollowTravelAction, LfgTravelToDungeonAction or
+// NewRpgInfiltrateAction, whichever is driving this bot right now - is actively stepping through a trip. A
+// proactive "go pick a fight with this" action (grinding on the way) should stand down while this is true and
+// AiPlayerbot.SmartTravelRunPastEnemies is on: the trip is meant to run past ordinary trash, not detour into a
+// kill. A mob that lands a hit on its own is a different matter - that already runs through
+// FollowTravelTrigger/TravelRunsThroughCombat, which this does not touch.
+bool IsSmartTravelling(PlayerbotAI* botAI);
+
 // Fires while a follower is far enough from its master that a plain navmesh follow would
 // beeline through the world. Handled by "follow travel".
 class FollowTravelTrigger : public Trigger

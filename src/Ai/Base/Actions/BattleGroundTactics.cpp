@@ -73,6 +73,13 @@ Position const AB_GY_CAMPING_HORDE = {723.513f, 725.924f, -28.265f, 3.99f};
 Position const AB_GY_CAMPING_ALLIANCE = {1262.627f, 1256.341f, -27.289f, 0.64f};
 // How far from the flag the bots holding a base stand.
 float const AB_GUARD_DISTANCE = 6.0f;
+// a guard at a flag the enemy has put its banner on stands this close to the flag, to take it back
+float const AB_GUARD_CONTESTED_DISTANCE = 2.5f;
+// how long a bot keeps its objective before "check objective" works out a new one
+uint32 const BG_OBJECTIVE_KEEP_SECONDS = 45;
+// how long a bot that got to its objective stands there before it looks for another one
+uint32 const BG_OBJECTIVE_LINGER_MIN_SECONDS = 10;
+uint32 const BG_OBJECTIVE_LINGER_MAX_SECONDS = 25;
 
 // the captains aren't the actual creatures but invisible trigger creatures - they still have correct death state and
 // location (unless they move)
@@ -1683,6 +1690,35 @@ BGTactics::WSDuty BGTactics::wsDuty(BattlegroundWS* ws, uint32& slot)
     return WSDuty::NONE;
 }
 
+// A bot with a post (Arathi Basin base guard, Warsong Gulch flag defender or ambusher) stays there: it does not run off
+// for a buff, does not give the post up because a teammate is taking the flag, and comes back to the very same spot
+// whenever its objective is worked out again.
+bool BGTactics::holdsPost()
+{
+    Battleground* bg = bot->GetBattleground();
+    if (!bg)
+        return false;
+
+    BattlegroundTypeId bgType = bg->GetBgTypeID();
+    if (bgType == BATTLEGROUND_RB)
+        bgType = bg->GetBgTypeID(true);
+
+    if (bgType == BATTLEGROUND_AB)
+    {
+        PositionMap& posMap = context->GetValue<PositionMap&>("position")->Get();
+        auto itr = posMap.find("bg guard");
+        return itr != posMap.end() && itr->second.isSet();
+    }
+
+    if (bgType == BATTLEGROUND_WS)
+    {
+        uint32 slot = 0;
+        return wsDuty(static_cast<BattlegroundWS*>(bg), slot) != WSDuty::NONE;
+    }
+
+    return false;
+}
+
 // Depends on OnBattlegroundStart in playerbots.cpp
 uint8 BGTactics::GetBotStrategyForTeam(Battleground* bg, TeamId teamId)
 {
@@ -1965,7 +2001,20 @@ bool BGTactics::Execute(Event /*event*/)
     }
 
     if (getName() == "check objective")
+    {
+        // The objective is not re-rolled every second: most of them are a random spot around a base, and a bot that
+        // gets a new one each time never gets to stand anywhere. Only a post is looked at that often (it has to give
+        // way at once when a flag is taken), and it comes out the same every time.
+        PositionMap& posMap = context->GetValue<PositionMap&>("position")->Get();
+        PositionInfo& checked = posMap["bg objective checked"];
+        uint32 const nowSec = getMSTime() / 1000;
+        uint32 const keepSec = holdsPost() ? 1 : BG_OBJECTIVE_KEEP_SECONDS;
+        if (posMap["bg objective"].isSet() && checked.isSet() && nowSec - static_cast<uint32>(checked.x) < keepSec)
+            return false;
+
+        checked.Set(static_cast<float>(nowSec), 0.0f, 0.0f, 0);
         return resetObjective();
+    }
 
     return false;
 }
@@ -2638,18 +2687,14 @@ bool BGTactics::selectObjective(bool reset)
                               BG_AB_NodePositions[guardNode][2]);
                 uint8 const enemyContested =
                     team == TEAM_ALLIANCE ? BG_AB_NODE_STATE_HORDE_CONTESTED : BG_AB_NODE_STATE_ALLY_CONTESTED;
-                if (ab->GetCapturePointInfo(guardNode)._state == enemyContested)
-                {
-                    // the enemy has put its banner up: stand at the flag, "check flag" takes it back
-                    post = bot->GetRandomPoint(post, 3.0f);
-                }
-                else
-                {
-                    // spread around the flag
-                    float const angle =
-                        BG_AB_NodePositions[guardNode][3] + guardSlot * 2.0f * static_cast<float>(M_PI) / guardSlots;
-                    bot->MovePositionToFirstCollision(post, AB_GUARD_DISTANCE, angle - bot->GetOrientation());
-                }
+                // Spread around the flag, each guard on his own spot (the same one every time it is worked out, so
+                // that he stays put). With the enemy's banner up he stands close, "check flag" takes it back.
+                float const angle =
+                    BG_AB_NodePositions[guardNode][3] + guardSlot * 2.0f * static_cast<float>(M_PI) / guardSlots;
+                float const distance = ab->GetCapturePointInfo(guardNode)._state == enemyContested
+                                           ? AB_GUARD_CONTESTED_DISTANCE
+                                           : AB_GUARD_DISTANCE;
+                bot->MovePositionToFirstCollision(post, distance, angle - bot->GetOrientation());
 
                 pos.Set(post.GetPositionX(), post.GetPositionY(), post.GetPositionZ(), bot->GetMapId());
                 posMap["bg objective"] = pos;
@@ -3525,6 +3570,23 @@ bool BGTactics::moveToObjective(bool ignoreDist)
         // don't try to move if already close
         if (bot->GetDistance(pos.x, pos.y, pos.z) < 4.0f)
         {
+            // Stand there for a while: picking the next spot the moment the last one is reached has the bots
+            // dashing from one to the next around a base and never guarding anything. The stay ends early
+            // whenever the objective is reset (a post is, once a second, and comes out the same).
+            PositionMap& posMap = context->GetValue<PositionMap&>("position")->Get();
+            PositionInfo& arrived = posMap["bg objective arrived"];
+            uint32 const nowSec = getMSTime() / 1000;
+            if (!arrived.isSet())
+            {
+                arrived.Set(static_cast<float>(nowSec),
+                            static_cast<float>(urand(BG_OBJECTIVE_LINGER_MIN_SECONDS, BG_OBJECTIVE_LINGER_MAX_SECONDS)),
+                            0.0f, 0);
+                return true;
+            }
+
+            if (nowSec - static_cast<uint32>(arrived.x) < static_cast<uint32>(arrived.y))
+                return true;
+
             resetObjective();
             return true;
         }
@@ -3708,6 +3770,7 @@ bool BGTactics::resetObjective()
     PositionInfo pos = context->GetValue<PositionMap&>("position")->Get()["bg objective"];
     pos.Reset();
     posMap["bg objective"] = pos;
+    posMap["bg objective arrived"].Reset();
 
     return selectObjective(true);
 }
@@ -4066,6 +4129,10 @@ bool BGTactics::atFlag(std::vector<BattleBotPath*> const& vPaths, std::vector<ui
         // If friendlies are capturing, stay to defend but don't capture
         if (numCapturing > 0 && capturingPlayer && bot->GetGUID() != capturingPlayer->GetGUID())
         {
+            // a guard stays at his post while the others take the flag
+            if (holdsPost())
+                return false;
+
             // Move away if too close to avoid crowding
             if (bot->GetDistance2d(capturingPlayer) < 3.0f)
             {
@@ -4371,6 +4438,8 @@ bool BGTactics::useBuff()
                       bot->HasAura(BG_WS_SPELL_SILVERWING_FLAG) || bot->HasAura(BG_EY_NETHERSTORM_FLAG_SPELL)) ||
                      !(teamFlagTaken() || flagTaken());
     bool foundBuff = false;
+    // a bot with a post leaves it only to heal up at a restoration buff that is right next to it
+    bool const holdingPost = holdsPost();
 
     for (ObjectGuid const guid : closeObjects)
     {
@@ -4381,9 +4450,13 @@ bool BGTactics::useBuff()
         if (!go->isSpawned())
             continue;
 
+        if (holdingPost && go->GetEntry() != Buff_Entries[1])
+            continue;
+
         // use speed buff only if close
-        if (ServerFacade::instance().IsDistanceGreaterThan(ServerFacade::instance().GetDistance2d(bot, go),
-                                                 go->GetEntry() == Buff_Entries[0] ? 20.0f : 50.0f))
+        if (ServerFacade::instance().IsDistanceGreaterThan(
+                ServerFacade::instance().GetDistance2d(bot, go),
+                holdingPost ? 15.0f : (go->GetEntry() == Buff_Entries[0] ? 20.0f : 50.0f)))
             continue;
 
         if (needSpeed && go->GetEntry() == Buff_Entries[0])

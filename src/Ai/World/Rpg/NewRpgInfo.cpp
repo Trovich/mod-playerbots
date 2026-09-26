@@ -72,6 +72,35 @@ void NewRpgInfo::ChangeToOutdoorPvp(ObjectGuid::LowType capturePointSpawnId)
     data = pvp;
 }
 
+void NewRpgInfo::ChangeToInfiltrate(WorldPosition target, uint32 zoneId)
+{
+    startT = getMSTime();
+    Infiltrate infiltrate;
+    infiltrate.target = target;
+    infiltrate.zoneId = zoneId;
+    data = infiltrate;
+}
+
+void NewRpgInfo::OnInfiltrateDeath(uint32 maxDeaths)
+{
+    auto* infiltrate = std::get_if<Infiltrate>(&data);
+    if (!infiltrate)
+        return;
+
+    ++infiltrate->deaths;
+    if (maxDeaths && infiltrate->deaths >= maxDeaths)
+    {
+        ChangeToIdle();
+        return;
+    }
+
+    infiltrate->phase = Infiltrate::Phase::Recover;
+    infiltrate->recoverSinceMs = 0;
+    infiltrate->patrol = WorldPosition();
+    infiltrate->patrolPauseUntilMs = 0;
+    infiltrate->patrolFails = 0;
+}
+
 void NewRpgInfo::ChangeToRest()
 {
     startT = getMSTime();
@@ -115,6 +144,7 @@ NewRpgStatus NewRpgInfo::StatusFromString(std::string const& name)
     if (name == "travel flight")  return RPG_TRAVEL_FLIGHT;
     if (name == "travel ferry")   return RPG_TRAVEL_FERRY;
     if (name == "outdoor pvp")    return RPG_OUTDOOR_PVP;
+    if (name == "infiltrate")     return RPG_INFILTRATE;
     return RPG_STATUS_END;
 }
 
@@ -132,6 +162,7 @@ NewRpgStatus NewRpgInfo::GetStatus()
         if constexpr (std::is_same_v<T, TravelFlight>) return RPG_TRAVEL_FLIGHT;
         if constexpr (std::is_same_v<T, TravelFerry>) return RPG_TRAVEL_FERRY;
         if constexpr (std::is_same_v<T, OutdoorPvP>) return RPG_OUTDOOR_PVP;
+        if constexpr (std::is_same_v<T, Infiltrate>) return RPG_INFILTRATE;
         return RPG_IDLE;
     }, data);
 }
@@ -212,6 +243,17 @@ std::string NewRpgInfo::ToString()
                 out << "\nNo capture point assigned.";
             else
                 out << "\ncapturePointSpawnId: " << arg.capturePointSpawnId;
+        }
+        else if constexpr (std::is_same_v<T, Infiltrate>)
+        {
+            out << "INFILTRATE";
+            out << "\ntargetZone: " << arg.zoneId;
+            out << "\ntarget: " << arg.target.GetMapId() << " " << arg.target.GetPositionX() << " "
+                << arg.target.GetPositionY();
+            out << "\nphase: "
+                << (arg.phase == Infiltrate::Phase::Travel ? "travel"
+                                                          : (arg.phase == Infiltrate::Phase::Raid ? "raid" : "recover"));
+            out << "\ndeaths: " << uint32(arg.deaths);
         }
         else
             out << "UNKNOWN";

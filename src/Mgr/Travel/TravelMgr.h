@@ -917,6 +917,12 @@ public:
     // bot's own region or no chain exists for this bot (faction, level, disabled transports).
     bool NextTravelEdge(Player* bot, WorldPosition const& goal, TravelEdge& out) const;
 
+    // A portal that stands in the bot's OWN region and lands closer to `staging` than reaching it directly would
+    // - e.g. a capital's own portal to the foot of the Dark Portal. The region graph above only models hops that
+    // cross a region boundary, so it cannot see this: both ends of that portal share one huge landmass region,
+    // even though physically it saves thousands of yards. Only returned when it actually saves real distance.
+    bool FindApproachShortcut(Player* bot, WorldPosition const& staging, TravelEdge& out) const;
+
     // The flight master standing at a DBC taxi node for this faction, or nullptr.
     FlightMasterInfo const* GetFlightMasterForNode(uint32 taxiNode, TeamId team) const;
 
@@ -1010,6 +1016,14 @@ public:
     const std::vector<WorldLocation> GetTeleportLocations(Player* bot);
     const std::vector<WorldLocation> GetTravelHubs(Player* bot);
     std::vector<WorldLocation> GetCityLocations(Player* bot);
+
+    // A landmark roughly in the middle of a foreign capital - a banker's stand, busy and easy to find - picked at
+    // random among the OTHER faction's own cities (never a neutral one: Shattrath/Dalaran are nobody's home turf).
+    // Used by the "infiltrate" RPG tactic. False when nothing enemy is on record (should not happen - four
+    // capitals per side, always loaded).
+    bool GetEnemyCapitalTarget(Player* bot, WorldPosition& out, uint32& outZoneId) const;
+    // A banker's stand picked at random in the capital of the given zone: the spots an infiltrator patrols between.
+    bool GetCapitalPatrolPoint(uint32 zoneId, WorldPosition& out) const;
     std::vector<uint32> GetFlightNodesInZone(uint32 zoneId, TeamId team, uint32 excludeNode = 0) const;
     bool SelectAuctioneerByMap(Player* bot, NpcLocation& outAuctioneer);
     const std::vector<WorldLocation>& GetLocsPerLevelCache(uint8 level) { return locsPerLevelCache[level]; }

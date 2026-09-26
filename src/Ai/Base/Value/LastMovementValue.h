@@ -14,6 +14,9 @@
 class PlayerbotAI;
 class Unit;
 
+// A flee state whose action has not run for this long belongs to a fight that is already over
+constexpr uint32 FLEE_STATE_STALE_MS = 3000;
+
 // High priority movement can override the previous low priority one
 enum class MovementPriority
 {
@@ -45,6 +48,14 @@ public:
 
     void clear();
 
+    void EndFlee()
+    {
+        fleeActive = false;
+        fleeStartMs = 0;
+        fleeLastMs = 0;
+        fleeFromGuid.Clear();
+    }
+
     void Set(Unit* follow);
     void Set(uint32 mapId, float x, float y, float z, float ori, float delayTime, MovementPriority priority = MovementPriority::MOVEMENT_NORMAL);
 
@@ -56,6 +67,12 @@ public:
     Unit* lastFollow;
     uint32 lastAreaTrigger;
     time_t lastFlee;
+    // Sticky flee state (FleeAction): once a flee starts it holds until the pursuit is over, instead of
+    // being re-decided every tick. Default member initialisers so the copy constructor stays valid.
+    bool fleeActive = false;
+    uint32 fleeStartMs = 0;
+    uint32 fleeLastMs = 0;  // last tick the flee action ran; a long gap means the fight ended and the state is stale
+    ObjectGuid fleeFromGuid;
     uint32 lastMoveToMapId;
     float lastMoveToX;
     float lastMoveToY;

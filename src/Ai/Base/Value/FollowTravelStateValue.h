@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "ObjectGuid.h"
 #include "TravelMgr.h"
 #include "Value.h"
 
@@ -102,14 +103,21 @@ public:
     // Walking legs of this plan that stalled; the next stall hops the bot to the leg's travel point.
     uint8 legFails = 0;
 
-    // TravelFarTo is following a complete navmesh route (which may lead away for a while) rather than a guess.
-    bool onRoute = false;
+    // Progress on this leg is measured along a complete navmesh route (its remaining length) rather than by the
+    // straight-line distance to the leg's target. A real route may lead away from the target for hundreds of yards
+    // - round the Hellfire Citadel wall, down to a city gate - and must not be mistaken for a bot going nowhere.
+    bool progressIsRoute = false;
 
     // No stepping stone found last tick: the next search (a couple of dozen path queries) waits until then.
     uint32 nextStepSearchMs = 0;
 
     // The human we travel toward is loading into a new place since then; 0 = not waiting.
     uint32 pendingSinceMs = 0;
+
+    // Enemies this trip already rooted / stunned once on the way (FleeAction while running through combat). One
+    // disable per enemy is enough to get past it; casting again every time the bot's route brings it near the
+    // same mob again is what made a caster loop back to it.
+    std::vector<ObjectGuid> disabledEnemies;
 };
 
 class FollowTravelStateValue : public ManualSetValue<FollowTravelState&>

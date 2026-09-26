@@ -164,6 +164,12 @@ bool CheckMountStateAction::isUseful()
         !bot->IsOutdoors() || bot->InArena())
         return false;
 
+    // Mounting is a cast of its own and cancels whatever the bot is casting or channeling. In a battleground that
+    // is the capture of a flag: the bot would get on its mount mid-capture, the capture logic would dismount it
+    // and start over, and so on for as long as the flag stays up.
+    if (bot->IsNonMeleeSpellCast(false))
+        return false;
+
     master = GetMaster();
 
     separatedFromMaster = master && master != bot &&

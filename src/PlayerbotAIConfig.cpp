@@ -502,6 +502,11 @@ bool PlayerbotAIConfig::Initialize()
     rpgFerryMaxDockDist = sConfigMgr->GetOption<float>("AiPlayerbot.RpgFerryMaxDockDist", 1500.0f);
     lfgWalkToDungeon = sConfigMgr->GetOption<bool>("AiPlayerbot.LfgWalkToDungeon",
         sWorld->getBoolConfig(CONFIG_LFG_SKIP_TELEPORT));
+    infiltrateMinLevel = sConfigMgr->GetOption<uint32>("AiPlayerbot.InfiltrateMinLevel", 60);
+    infiltrateMaxDeaths = sConfigMgr->GetOption<uint32>("AiPlayerbot.InfiltrateMaxDeaths", 5);
+
+    flyMountCruiseAltitude = sConfigMgr->GetOption<bool>("AiPlayerbot.FlyMountCruiseAltitude", true);
+    flyMountCruiseMaxHeight = sConfigMgr->GetOption<float>("AiPlayerbot.FlyMountCruiseMaxHeight", 60.0f);
 
     LOG_INFO("server.loading", "Loading TalentSpecs...");
 
@@ -791,6 +796,7 @@ bool PlayerbotAIConfig::Initialize()
     RpgStatusProbWeight[RPG_REST] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.Rest", 5);
     RpgStatusProbWeight[RPG_OUTDOOR_PVP] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.OutdoorPvp", 10);
     RpgStatusProbWeight[RPG_TRAVEL_FERRY] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.TravelFerry", 8);
+    RpgStatusProbWeight[RPG_INFILTRATE] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.Infiltrate", 3);
 
     syncLevelWithPlayers = sConfigMgr->GetOption<bool>("AiPlayerbot.SyncLevelWithPlayers", false);
     randomBotGroupNearby = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotGroupNearby", false);

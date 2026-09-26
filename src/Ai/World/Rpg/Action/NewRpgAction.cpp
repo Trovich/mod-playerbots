@@ -179,6 +179,21 @@ bool TellRpgStatusAction::Execute(Event event)
         WhisperStatusChange(owner, "OUTDOOR_PVP");
         return true;
     }
+    else if (status == RPG_INFILTRATE)
+    {
+        WorldPosition target;
+        uint32 zoneId = 0;
+        if (!sTravelMgr.GetEnemyCapitalTarget(bot, target, zoneId))
+        {
+            std::string msg = PlayerbotTextMgr::instance().GetBotTextOrDefault(
+                "rpg_no_infiltrate_target_error", "No enemy capital on record.", {});
+            bot->Whisper(msg, LANG_UNIVERSAL, owner);
+            return false;
+        }
+        info.ChangeToInfiltrate(target, zoneId);
+        WhisperStatusChange(owner, "INFILTRATE");
+        return true;
+    }
     else if (status == RPG_DO_QUEST)
     {
         if (!questId)
@@ -221,7 +236,7 @@ bool TellRpgStatusAction::Execute(Event event)
     std::string msg = PlayerbotTextMgr::instance().GetBotTextOrDefault(
         "rpg_unknown_status_error",
         "Unknown rpg status. Options: idle, rest, wander random, wander npc, "
-        "go grind, go camp, do quest [<id>], travel flight, outdoor pvp.", {});
+        "go grind, go camp, do quest [<id>], travel flight, outdoor pvp, infiltrate.", {});
     bot->Whisper(msg, LANG_UNIVERSAL, owner);
     return false;
 }
@@ -254,7 +269,8 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
     {
         case RPG_IDLE:
             return RandomChangeStatus({RPG_GO_CAMP, RPG_GO_GRIND, RPG_WANDER_RANDOM, RPG_WANDER_NPC, RPG_DO_QUEST,
-                                       RPG_TRAVEL_FLIGHT, RPG_TRAVEL_FERRY, RPG_REST, RPG_OUTDOOR_PVP});
+                                       RPG_TRAVEL_FLIGHT, RPG_TRAVEL_FERRY, RPG_REST, RPG_OUTDOOR_PVP,
+                                       RPG_INFILTRATE});
 
         case RPG_GO_GRIND:
         {
@@ -313,6 +329,10 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
         }
         case RPG_TRAVEL_FERRY:
             // Driven entirely by NewRpgTravelFerryAction, which switches back to IDLE itself.
+            break;
+        case RPG_INFILTRATE:
+            // Driven entirely by NewRpgInfiltrateAction, which switches back to IDLE itself (arrival, a strike,
+            // or a give-up along the way).
             break;
         case RPG_TRAVEL_FLIGHT:
         {
@@ -761,7 +781,8 @@ bool NewRpgTravelFerryAction::Execute(Event /*event*/)
         // It sailed between hop and attach - step back onto our spot on the pier and wait again.
         data.deckPos = WorldPosition();
         WorldPosition const& back = data.waitPos ? data.waitPos : data.dockPos;
-        bot->NearTeleportTo(back.GetPositionX(), back.GetPositionY(), back.GetPositionZ(), bot->GetOrientation());
+        if (back)
+            bot->NearTeleportTo(back.GetPositionX(), back.GetPositionY(), back.GetPositionZ(), bot->GetOrientation());
         return true;
     }
 

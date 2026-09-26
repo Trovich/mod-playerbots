@@ -239,6 +239,12 @@ void WorldPosition::setO(float o) { m_orientation = o; }
 
 WorldPosition::operator bool() const
 {
+    // A default-constructed WorldPosition is MAPID_INVALID at the origin and means "not set" everywhere in the
+    // module (see IsValid()). It must never read as a usable position: that is how an unset dock / deck / waypoint
+    // turned into a teleport to (0,0,0).
+    if (GetMapId() == MAPID_INVALID)
+        return false;
+
     return GetMapId() != 0 || GetPositionX() != 0 || GetPositionY() != 0 || GetPositionZ() != 0;
 }
 
@@ -4694,8 +4700,11 @@ uint32 TravelMgr::GetTravelRegion(uint32 mapId, float x, float y, float z)
                 return z > 250.0f ? base + 1 : base + 2;
             return base;
         case 530:
-            // Azuremyst / Bloodmyst / The Exodar - reached from Kalimdor by boat only.
-            if (x > -6500.0f && x < -500.0f && y > -14500.0f && y < -9500.0f)
+            // Azuremyst / Bloodmyst / The Exodar - reached from Kalimdor by boat only. The box has to cover the
+            // open sea around the islands as well: a bot that ends up in the water there (riding the Auberdine
+            // boat, or dropped by it) would otherwise count as standing in Outland and plan a trip through the
+            // Dark Portal. Outland itself lies north of y = -9000.
+            if (x > -9000.0f && x < 2000.0f && y > -18000.0f && y < -9000.0f)
                 return base + 1;
             // Isle of Quel'Danas.
             if (x > 12500.0f && y > -8500.0f && y < -4500.0f)
@@ -5011,15 +5020,30 @@ void TravelMgr::BuildTravelEdges()
     {
         edge.fromRegion = GetTravelRegion(edge.staging);
         edge.toRegion = GetTravelRegion(edge.dest);
-        if (edge.fromRegion != edge.toRegion)  // a hop inside one region buys nothing
+
+        // A same-region hop buys nothing for the taxi/ferry graph - both ends are already walkable from one
+        // another - but a PORTAL is the one exception: "capital -> the foot of the Dark Portal" lands on the
+        // same huge landmass region as where it stands, yet is a shortcut of thousands of yards in the real
+        // world. Kept here (invisible to the region-hop BFS by design) so FindApproachShortcut can find it.
+        if (edge.fromRegion != edge.toRegion || edge.kind == TravelEdge::Kind::Portal)
             travelEdges.push_back(edge);
     };
 
+    uint32 portalRows = 0;
     for (PortalRow const& row : PORTAL_ROWS)
     {
         SpellTargetPosition const* pos = ResolvePortalDestination(row.spellId);
         if (!pos)
+        {
+            // Silent before: a capital's Blasted Lands portal that fails to resolve just makes FindApproachShortcut
+            // find nothing, and a bot then flies straight to the Dark Portal instead of using it.
+            LOG_WARN("playerbots",
+                     "Playerbots: portal spell {} at map {} ({:.0f},{:.0f}) has no destination in "
+                     "spell_target_position - bots will not use it",
+                     row.spellId, row.hubMap, row.x, row.y);
             continue;
+        }
+        ++portalRows;
 
         TravelEdge edge;
         edge.kind = TravelEdge::Kind::Portal;
@@ -5091,7 +5115,8 @@ void TravelMgr::BuildTravelEdges()
                 add(edge);
             }
 
-    LOG_INFO("playerbots", "Playerbots: {} portal / taxi / ferry link(s) between travel regions.", travelEdges.size());
+    LOG_INFO("playerbots", "Playerbots: {} portal / taxi / ferry link(s) between travel regions ({} of {} city portals).",
+             travelEdges.size(), portalRows, sizeof(PORTAL_ROWS) / sizeof(PORTAL_ROWS[0]));
 }
 
 bool TravelMgr::NextTravelEdge(Player* bot, WorldPosition const& goal, TravelEdge& out) const
@@ -5168,6 +5193,52 @@ bool TravelMgr::NextTravelEdge(Player* bot, WorldPosition const& goal, TravelEdg
         if (score < bestScore)
         {
             bestScore = score;
+            best = &e;
+        }
+    }
+
+    if (!best)
+        return false;
+
+    out = *best;
+    return true;
+}
+
+bool TravelMgr::FindApproachShortcut(Player* bot, WorldPosition const& staging, TravelEdge& out) const
+{
+    constexpr float MIN_GAIN = 500.0f;  // ignore a "shortcut" that barely shortens the approach
+
+    if (!bot || bot->GetMapId() != staging.GetMapId())
+        return false;
+
+    uint32 const region =
+        GetTravelRegion(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+    float const direct = bot->GetExactDist2d(staging.GetPositionX(), staging.GetPositionY());
+
+    TravelEdge const* best = nullptr;
+    float bestScore = direct - MIN_GAIN;
+
+    for (TravelEdge const& e : travelEdges)
+    {
+        // Only a PORTAL that never leaves the bot's own region is invisible to the region graph above - a
+        // ferry or a real cross-region bridge is already found (and taken) through NextTravelEdge.
+        if (e.kind != TravelEdge::Kind::Portal || e.fromRegion != region || e.toRegion != region)
+            continue;
+
+        if (e.dest.GetMapId() != staging.GetMapId())
+            continue;
+
+        if (e.team != TEAM_NEUTRAL && e.team != bot->GetTeamId())
+            continue;
+
+        if (e.minLevel && bot->GetLevel() < e.minLevel)
+            continue;
+
+        float const via = bot->GetExactDist2d(e.staging.GetPositionX(), e.staging.GetPositionY()) +
+                          e.dest.GetExactDist2d(staging.GetPositionX(), staging.GetPositionY());
+        if (via < bestScore)
+        {
+            bestScore = via;
             best = &e;
         }
     }
@@ -5499,6 +5570,47 @@ std::vector<WorldLocation> TravelMgr::GetCityLocations(Player* bot)
         return { locIt->second };
     // Fallback if something went wrong
     return fallbackLocations;
+}
+
+bool TravelMgr::GetEnemyCapitalTarget(Player* bot, WorldPosition& out, uint32& outZoneId) const
+{
+    if (!bot)
+        return false;
+
+    TeamId const botTeam = bot->GetTeamId();
+    std::vector<Capital const*> enemyCapitals;
+    for (Capital const& capital : capitals)
+        if (capital.team != TEAM_NEUTRAL && capital.team != botTeam)
+            enemyCapitals.push_back(&capital);
+
+    if (enemyCapitals.empty())
+        return false;
+
+    Capital const* target = enemyCapitals[urand(0, enemyCapitals.size() - 1)];
+    uint16 const bankerEntry = target->bankers[urand(0, target->bankers.size() - 1)];
+
+    auto const locIt = bankerEntryToLocation.find(bankerEntry);
+    if (locIt == bankerEntryToLocation.end())
+        return false;
+
+    out = WorldPosition(locIt->second);
+    outZoneId = target->zoneId;
+    return true;
+}
+
+bool TravelMgr::GetCapitalPatrolPoint(uint32 zoneId, WorldPosition& out) const
+{
+    Capital const* capital = FindCapitalByZone(zoneId);
+    if (!capital || capital->bankers.empty())
+        return false;
+
+    uint16 const bankerEntry = capital->bankers[urand(0, capital->bankers.size() - 1)];
+    auto const locIt = bankerEntryToLocation.find(bankerEntry);
+    if (locIt == bankerEntryToLocation.end())
+        return false;
+
+    out = WorldPosition(locIt->second);
+    return true;
 }
 
 void TravelMgr::PrepareZone2LevelBracket()

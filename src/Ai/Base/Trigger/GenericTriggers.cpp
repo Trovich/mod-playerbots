@@ -9,6 +9,7 @@
 #include "CreatureAI.h"
 #include "GenericBuffUtils.h"
 #include "ItemVisitors.h"
+#include "LastMovementValue.h"
 #include "LastSpellCastValue.h"
 #include "ObjectGuid.h"
 #include "Player.h"
@@ -159,6 +160,22 @@ bool PanicTrigger::IsActive()
     return health < sPlayerbotAIConfig.criticalHealth &&
            (!AI_VALUE2(bool, "has mana", "self target") ||
             AI_VALUE2(uint8, "mana", "self target") < sPlayerbotAIConfig.lowMana);
+}
+
+bool FleeingTrigger::IsActive()
+{
+    LastMovement& lastMove = AI_VALUE(LastMovement&, "last movement");
+    if (!lastMove.fleeActive)
+        return false;
+
+    // the flee action has not run for a while: that fight is over, and so is its flee
+    if (!bot->IsAlive() || getMSTime() - lastMove.fleeLastMs > FLEE_STATE_STALE_MS)
+    {
+        lastMove.EndFlee();
+        return false;
+    }
+
+    return true;
 }
 
 bool OutNumberedTrigger::IsActive()

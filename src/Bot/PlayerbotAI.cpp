@@ -256,6 +256,13 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         bot->GetSession()->isLogingOut() || bot->IsDuringRemoveFromWorld())
         return;
 
+    // Scourge Invasion 2008 (mod-scourge-invasion-2008): a bot that has turned into a zombie is driven
+    // entirely by the event module (ZombieInfestation::Mgr::UpdateBotZombieWander). Running the normal
+    // strategy engine on top of it would keep sending the bot back to questing/grinding/following.
+    // 43869 = "You're a Zombie!"; the aura is removed on death, cure or the bot's zombie timeout.
+    if (bot->HasAura(43869))
+        return;
+
     // Handle cheat options (set bot health and power if cheats are enabled)
     if (bot->IsAlive() &&
         (static_cast<uint32>(GetCheat()) > 0 || static_cast<uint32>(sPlayerbotAIConfig.botCheatMask) > 0))
@@ -1549,6 +1556,9 @@ void PlayerbotAI::DoNextAction(bool min)
         aiObjectContext->GetValue<ObjectGuid>("pull target")->Set(ObjectGuid::Empty);
         aiObjectContext->GetValue<ObjectGuid>("pull strategy target")->Set(ObjectGuid::Empty);
         aiObjectContext->GetValue<LootObject>("loot target")->Set(LootObject());
+
+        // a death on an infiltration counts against it (or ends it)
+        rpgInfo.OnInfiltrateDeath(sPlayerbotAIConfig.infiltrateMaxDeaths);
 
         ChangeEngine(BOT_STATE_DEAD);
         return;

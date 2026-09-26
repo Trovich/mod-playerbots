@@ -128,6 +128,7 @@ private:
     std::vector<Player*> getTeamBots(Battleground* bg, TeamId teamId);
     bool abGuardDuty(BattlegroundAB* ab, uint8 strategy, uint8& guardNode, uint32& slot, uint32& slots);
     WSDuty wsDuty(BattlegroundWS* ws, uint32& slot);
+    bool holdsPost();
     bool moveToStart(bool force = false);
     bool selectObjective(bool reset = false);
     bool moveToObjective(bool ignoreDist);

@@ -8,6 +8,9 @@
 #include "CombatManager.h"
 #include "Playerbots.h"
 #include "ServerFacade.h"
+#include "Spell.h"
+#include "SpellAuraEffects.h"
+#include "SpellInfo.h"
 #include "Vehicle.h"
 
 bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
@@ -36,7 +39,104 @@ bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
     return false;
 }
 
-Unit* EnemyPlayerValue::Calculate()
+Unit* EnemyPlayerValue::Calculate() { return PreferSupportTarget(SelectTarget()); }
+
+namespace
+{
+    // how long a support pick is kept
+    constexpr uint32 SUPPORT_PICK_MS = 4000;
+    // a target this low is finished off rather than left for his healer
+    constexpr float SUPPORT_FINISH_HEALTH_PCT = 20.0f;
+    constexpr float SUPPORT_RANGE_MELEE = 25.0f;
+    constexpr float SUPPORT_RANGE_RANGED = 35.0f;
+}
+
+// Is this enemy player healing the target: a heal of his on the way to him, a heal over time of his on him, or, for
+// someone who heals for a living, just having him picked as his target.
+bool EnemyPlayerValue::IsHealing(Player* healer, Unit* target)
+{
+    for (CurrentSpellTypes type : {CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL})
+    {
+        Spell* spell = healer->GetCurrentSpell(type);
+        if (spell && spell->m_spellInfo && spell->m_targets.GetUnitTarget() == target &&
+            spell->m_spellInfo->HasEffect(SPELL_EFFECT_HEAL))
+            return true;
+    }
+
+    for (AuraEffect const* effect : target->GetAuraEffectsByType(SPELL_AURA_PERIODIC_HEAL))
+        if (effect->GetCasterGUID() == healer->GetGUID())
+            return true;
+
+    return healer->GetTarget() == target->GetGUID() && PlayerbotAI::IsHeal(healer);
+}
+
+Unit* EnemyPlayerValue::PreferSupportTarget(Unit* fallback)
+{
+    // The one to look for healers of is the enemy the bot is already fighting: SelectTarget() leaves him out, it
+    // looks for someone else. With no one in hand, it is the one it would attack next.
+    Unit* target = bot->GetVictim();
+    if (!target || !target->IsPlayer())
+        target = fallback;
+
+    // PvP against players only, and only as part of a team
+    if (!target || !target->IsPlayer() || bot->GetVehicle() || (!bot->InBattleground() && !bot->GetGroup()))
+        return fallback;
+
+    // a flag carrier comes first, and so does a target that is about to fall
+    if (target->HasAura(23333) || target->HasAura(23335) || target->GetHealthPct() < SUPPORT_FINISH_HEALTH_PCT)
+        return fallback;
+
+    float const range = PlayerbotAI::IsMelee(bot) ? SUPPORT_RANGE_MELEE : SUPPORT_RANGE_RANGED;
+    auto const reachable = [&](Player* enemy)
+    {
+        return enemy && enemy->IsAlive() && enemy->IsInWorld() && bot->IsWithinDist(enemy, range) &&
+               bot->IsWithinLOSInMap(enemy);
+    };
+
+    uint32 const now = getMSTime();
+    if (supportUntilMs > now)
+    {
+        Unit* previousUnit = botAI->GetUnit(supportGuid);
+        Player* previous = previousUnit ? previousUnit->ToPlayer() : nullptr;
+        if (previous && previous != target && reachable(previous) && botAI->IsOpposing(previous))
+            return previous;
+    }
+
+    Player* healer = nullptr;
+    Player* caster = nullptr;
+    for (ObjectGuid const guid : AI_VALUE(GuidVector, "nearest enemy players"))
+    {
+        Unit* enemyUnit = botAI->GetUnit(guid);
+        Player* enemy = enemyUnit ? enemyUnit->ToPlayer() : nullptr;
+        if (!enemy || enemy == target || !reachable(enemy))
+            continue;
+
+        // the weakest one is the pick, so that a whole team goes for the same one
+        auto const weaker = [](Player* a, Player* b)
+        { return !b || a->GetHealth() < b->GetHealth() || (a->GetHealth() == b->GetHealth() && a->GetGUID() < b->GetGUID()); };
+
+        if (IsHealing(enemy, target))
+        {
+            if (weaker(enemy, healer))
+                healer = enemy;
+        }
+        else if (PlayerbotAI::IsCaster(enemy) && !PlayerbotAI::IsHeal(enemy))
+        {
+            if (weaker(enemy, caster))
+                caster = enemy;
+        }
+    }
+
+    Player* pick = healer ? healer : caster;
+    if (!pick)
+        return fallback;
+
+    supportGuid = pick->GetGUID();
+    supportUntilMs = now + SUPPORT_PICK_MS;
+    return pick;
+}
+
+Unit* EnemyPlayerValue::SelectTarget()
 {
     bool controllingCannon = false;
     bool controllingVehicle = false;

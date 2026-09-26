@@ -6,7 +6,9 @@
 
 #include "ChooseTargetActions.h"
 #include "ChooseRpgTargetAction.h"
+#include "Creature.h"
 #include "Event.h"
+#include "FollowTravelAction.h"
 #include "LootObjectStack.h"
 #include "NewRpgStrategy.h"
 #include "Playerbots.h"
@@ -118,6 +120,17 @@ bool AttackAnythingAction::isUseful()
     Unit* target = GetTarget();
     if (!target || !target->IsInWorld())  // Checks if the target is valid and in the world
         return false;
+
+    // A trip in progress should run past ordinary trash instead of detouring into a fight with it - this is the
+    // proactive "go pick a fight" path (the target has not attacked us), so a mob that catches the bot anyway
+    // is untouched by this and still runs through FollowTravelTrigger/TravelRunsThroughCombat as before.
+    if (sPlayerbotAIConfig.smartTravelRunPastEnemies && IsSmartTravelling(botAI))
+    {
+        Creature* creature = target->ToCreature();
+        bool const worthStoppingFor = creature && (creature->isElite() || creature->isWorldBoss());
+        if (!worthStoppingFor)
+            return false;
+    }
 
     std::string const name = std::string(target->GetName());
     if (!name.empty() &&

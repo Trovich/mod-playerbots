@@ -780,6 +780,17 @@ AiPlayerbot.SmartTravelMaxTaxiHops = 6
 # (bots then stay put unless led). Default: follow DungeonFinder.SkipTeleport.
 AiPlayerbot.LfgWalkToDungeon = 0
 
+# A flying-mounted bot climbs to a cruising altitude for a long leg instead of hugging the terrain in
+# a straight line - every travel/roam call hands it a near-ground destination, and without this a
+# flying mount would otherwise skim a meter above the ground the whole way. Short hops are left alone,
+# and the bot comes back down for the final approach on its own (see FlyMountCruiseMaxHeight below).
+# 1 - on, 0 - off.
+AiPlayerbot.FlyMountCruiseAltitude = 1
+
+# Cap on how high AiPlayerbot.FlyMountCruiseAltitude climbs above the terrain, yards. Only reached on
+# long legs; a short hop climbs less. Default: 60
+AiPlayerbot.FlyMountCruiseMaxHeight = 60
+
 #
 #
 ####################################################################################################
@@ -1506,6 +1517,8 @@ AiPlayerbot.EnableNewRpgStrategy = 1
 # Rest          (Default: 5   Take a break for a while and do nothing)
 # OutdoorPvp    (Default: 10  Participate in outdoor PvP capture points if already in an outdoor PvP zone)
 # TravelFerry   (Default: 8   Ride a boat / zeppelin to another continent, the slow way)
+# Infiltrate    (Default: 3   A high-level rogue/druid sneaks into a foreign capital and picks a fight - rare
+#                              on purpose; see AiPlayerbot.InfiltrateMinLevel below)
 AiPlayerbot.RpgStatusProbWeight.WanderRandom = 15
 AiPlayerbot.RpgStatusProbWeight.WanderNpc = 20
 AiPlayerbot.RpgStatusProbWeight.GoGrind = 15
@@ -1515,6 +1528,22 @@ AiPlayerbot.RpgStatusProbWeight.TravelFlight = 15
 AiPlayerbot.RpgStatusProbWeight.Rest = 5
 AiPlayerbot.RpgStatusProbWeight.OutdoorPvp = 10
 AiPlayerbot.RpgStatusProbWeight.TravelFerry = 8
+AiPlayerbot.RpgStatusProbWeight.Infiltrate = 3
+
+# Minimum level for the Infiltrate RPG status above: only a Rogue or Druid (Stealth / Prowl) at or above this
+# level will ever roll it. The bot travels to a random foreign capital (flights/portals/ferries, same as any
+# other long trip), dismounts and sneaks in on foot, stealthed, and patrols the city from banker to banker. It
+# opens on the nearest enemy player in reach, else on a guard, and the fight itself is the normal combat AI's
+# call. When it is over the bot stealths again, eats up if it is hurt, and carries on.
+# Default: 60
+AiPlayerbot.InfiltrateMinLevel = 60
+
+# How many times the bot may die on an infiltration. After each death it goes home (its homebind, when it was
+# killed in or near the city), eats and drinks until it is well again, and travels back for another go. The
+# death that reaches this number ends the infiltration: the bot goes idle and carries on as any other bot.
+# 0 = no limit (only the bot giving up, e.g. finding no way through the city, ends it)
+# Default: 5
+AiPlayerbot.InfiltrateMaxDeaths = 5
 
 # How far a free-roaming bot will look for a ferry pier when it rolls the TravelFerry status.
 # Yards. Default: 1500

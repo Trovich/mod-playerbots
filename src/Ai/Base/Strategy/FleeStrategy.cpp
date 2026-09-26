@@ -9,8 +9,11 @@
 
 void FleeStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
 {
+    // a flee that has started runs to its end, whatever the health/outnumbered checks say from one tick to the next
     triggers.push_back(
-        new TriggerNode("panic", { NextAction("flee", ACTION_EMERGENCY + 9) }));
+        new TriggerNode("fleeing", { NextAction("flee", ACTION_EMERGENCY + 9) }));
+    triggers.push_back(
+        new TriggerNode("panic",{ NextAction("flee", ACTION_EMERGENCY + 9) }));
     triggers.push_back(
         new TriggerNode("outnumbered", { NextAction("flee", ACTION_EMERGENCY + 9) }));
     triggers.push_back(

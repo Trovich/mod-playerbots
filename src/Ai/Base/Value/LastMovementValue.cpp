@@ -38,6 +38,7 @@ void LastMovement::clear()
     lastFollow = nullptr;
     lastAreaTrigger = 0;
     lastFlee = 0;
+    EndFlee();
     nextTeleport = 0;
     msTime = 0;
     lastdelayTime = 0;

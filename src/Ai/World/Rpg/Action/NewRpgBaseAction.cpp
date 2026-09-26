@@ -42,6 +42,28 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
     if (dest == WorldPosition())
         return false;
 
+    // A cached destination (a grind/camp spot built from a creature spawn at startup) can carry a Z the height
+    // query never actually resolved (INVALID_HEIGHT / VMAP_INVALID_HEIGHT_VALUE) - walking there just wastes
+    // effort, but the stuck-recovery teleport further down would otherwise drop the bot straight into the void
+    // at that raw sentinel value. Repair it once, up front, using the bot's own height as the search hint (by
+    // the time this matters the bot has usually already walked most of the way there).
+    if (dest.GetPositionZ() <= INVALID_HEIGHT || dest.GetPositionZ() == VMAP_INVALID_HEIGHT_VALUE)
+    {
+        float const z = bot->GetMap()->GetHeight(bot->GetPhaseMask(), dest.GetPositionX(), dest.GetPositionY(),
+                                                  bot->GetPositionZ(), true, 200.0f);
+        if (z <= INVALID_HEIGHT || z == VMAP_INVALID_HEIGHT_VALUE)
+        {
+            LOG_DEBUG("playerbots", "[New RPG] {} dropped a destination with no resolvable ground at ({:.0f},{:.0f})",
+                      bot->GetName(), dest.GetPositionX(), dest.GetPositionY());
+            return false;
+        }
+
+        LOG_DEBUG("playerbots",
+                  "[New RPG] {} repaired a destination with no ground at ({:.0f},{:.0f}): {:.0f} -> {:.0f}",
+                  bot->GetName(), dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), z);
+        dest.setZ(z);
+    }
+
     if (dest != botAI->rpgInfo.moveFarPos)
     {
         // clear stuck information if it's a new dest
@@ -1224,6 +1246,17 @@ bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateSta
             botAI->rpgInfo.ChangeToOutdoorPvp();
             return true;
         }
+        case RPG_INFILTRATE:
+        {
+            WorldPosition target;
+            uint32 zoneId = 0;
+            if (sTravelMgr.GetEnemyCapitalTarget(bot, target, zoneId))
+            {
+                botAI->rpgInfo.ChangeToInfiltrate(target, zoneId);
+                return true;
+            }
+            return false;
+        }
         default:
         {
             botAI->rpgInfo.ChangeToRest();
@@ -1303,6 +1336,19 @@ bool NewRpgBaseAction::CheckRpgStatusAvailable(NewRpgStatus status)
 
             OutdoorPvP* outdoorPvP = sOutdoorPvPMgr->GetOutdoorPvPToZoneId(zoneId);
             return outdoorPvP != nullptr;
+        }
+        case RPG_INFILTRATE:
+        {
+            if (bot->getClass() != CLASS_ROGUE && bot->getClass() != CLASS_DRUID)
+                return false;
+            if (bot->GetLevel() < sPlayerbotAIConfig.infiltrateMinLevel)
+                return false;
+            if (bot->InBattleground() || bot->GetMap()->Instanceable())
+                return false;
+
+            WorldPosition target;
+            uint32 zoneId = 0;
+            return sTravelMgr.GetEnemyCapitalTarget(bot, target, zoneId);
         }
         default:
             return false;

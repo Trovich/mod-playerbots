@@ -82,6 +82,26 @@ struct NewRpgInfo
     {
         ObjectGuid::LowType capturePointSpawnId{0};
     };
+    // RPG_INFILTRATE
+    struct Infiltrate
+    {
+        enum class Phase : uint8
+        {
+            Travel,   // on the way to the capital (flights/ferries/roads), mounted
+            Raid,     // in and around the city, on foot and stealthed: patrols, picks fights
+            Recover   // after a death: home, eat and drink, then back to Travel
+        };
+
+        WorldPosition target{};         // a banker's stand roughly in the middle of the enemy capital
+        uint32 zoneId{0};               // that capital's zone
+        Phase phase{Phase::Travel};
+        uint8 deaths{0};                // deaths since the raid began; the raid is over at the configured limit
+        WorldPosition patrol{};         // the spot in the city it is walking to (unset: pick one)
+        uint32 patrolSinceMs{0};        // when it set out for that spot
+        uint32 patrolPauseUntilMs{0};   // standing still, stealthed, at a spot it has reached, until then
+        uint8 patrolFails{0};           // consecutive spots it could not find a way to
+        uint32 recoverSinceMs{0};       // when the recovery began (0: not begun)
+    };
     struct Idle
     {
     };
@@ -105,7 +125,8 @@ struct NewRpgInfo
         Rest,
         TravelFlight,
         TravelFerry,
-        OutdoorPvP
+        OutdoorPvP,
+        Infiltrate
     >;
     RpgData data;
 
@@ -120,6 +141,10 @@ struct NewRpgInfo
     void ChangeToTravelFlight(uint32 flightMasterEntry, WorldPosition flightMasterPos, std::vector<uint32> path);
     void ChangeToTravelFerry(uint32 transportEntry, WorldPosition dockPos, WorldPosition landPos);
     void ChangeToOutdoorPvp(ObjectGuid::LowType capturePointSpawnId = 0);
+    void ChangeToInfiltrate(WorldPosition target, uint32 zoneId);
+    // The bot has died. While it is on an infiltration this counts against the raid: it goes to recover, or, once
+    // `maxDeaths` (0 = no limit) is reached, the raid is over and the bot goes idle.
+    void OnInfiltrateDeath(uint32 maxDeaths);
     void ChangeToRest();
     void ChangeToIdle();
     bool CanChangeTo(NewRpgStatus status);
