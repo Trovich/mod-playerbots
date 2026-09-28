@@ -254,11 +254,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool /*idle
             if (bot->IsSitState())
                 bot->SetStandState(UNIT_STAND_STATE_STAND);
 
-            // if (bot->IsNonMeleeSpellCast(true))
-            // {
-            //     bot->CastStop();
-            //     botAI->InterruptSpell();
-            // }
+            // bot->CastStop();
+
             DoMovePoint(bot, x, y, z, generatePath, backwards);
             float delay = 1000.0f * MoveDelay(distance, backwards);
             if (lessDelay)
@@ -284,11 +281,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool /*idle
             if (bot->IsSitState())
                 bot->SetStandState(UNIT_STAND_STATE_STAND);
 
-            // if (bot->IsNonMeleeSpellCast(true))
-            // {
-            //     bot->CastStop();
-            //     botAI->InterruptSpell();
-            // }
+            // bot->CastStop();
+
             DoMovePoint(bot, x, y, modifiedZ, generatePath, backwards);
             float delay = 1000.0f * MoveDelay(distance, backwards);
             if (lessDelay)
@@ -672,12 +666,7 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool /*idle
     //     if (bot->IsSitState())
     //         bot->SetStandState(UNIT_STAND_STATE_STAND);
 
-    //     if (bot->IsNonMeleeSpellCast(true))
-    //     {
-    //         bot->CastStop();
-    //         botAI->InterruptSpell();
-    //     }
-    // }
+    //     bot->CastStop();
 
     //  /* Why do we do this?
     // if (lastMove.lastMoveShort.distance(movePosition) < minDist)
@@ -1281,11 +1270,7 @@ bool MovementAction::Follow(Unit* target, float distance, float angle)
     if (bot->IsSitState())
         bot->SetStandState(UNIT_STAND_STATE_STAND);
 
-    if (bot->IsNonMeleeSpellCast(true))
-    {
-        bot->CastStop();
-        botAI->InterruptSpell();
-    }
+    bot->CastStop();
 
     // AI_VALUE(LastMovement&, "last movement").Set(target);
     ClearIdleState();
@@ -1327,11 +1312,7 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance)
     if (!bot->IsStandState())
         bot->SetStandState(UNIT_STAND_STATE_STAND);
 
-    if (bot->IsNonMeleeSpellCast(true))
-    {
-        bot->CastStop();
-        botAI->InterruptSpell();
-    }
+    bot->CastStop();
 
     // bot->GetMotionMaster()->Clear();
     bot->GetMotionMaster()->MoveChase((Unit*)obj, distance);
@@ -2188,7 +2169,7 @@ bool AvoidAoeAction::AvoidAuraWithDynamicObj()
     {
         return false;
     }
-    const SpellInfo* spellInfo = aura->GetSpellInfo();
+    SpellInfo const* spellInfo = aura->GetSpellInfo();
     if (!spellInfo)
     {
         return false;
@@ -2244,7 +2225,7 @@ bool AvoidAoeAction::AvoidGameObjectWithDamage()
         {
             continue;
         }
-        const GameObjectTemplate* goInfo = go->GetGOInfo();
+        GameObjectTemplate const* goInfo = go->GetGOInfo();
         if (!goInfo)
         {
             continue;
@@ -2263,7 +2244,7 @@ bool AvoidAoeAction::AvoidGameObjectWithDamage()
             sPlayerbotAIConfig.aoeAvoidSpellWhitelist.end())
             continue;
 
-        const SpellInfo* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
         if (!spellInfo || spellInfo->IsPositive())
         {
             continue;
@@ -2318,15 +2299,15 @@ bool AvoidAoeAction::AvoidUnitWithDamageAura()
             unit->GetAuraEffectsByType(SPELL_AURA_PERIODIC_TRIGGER_SPELL);
         Unit::AuraEffectList const& aurasPeriodicTriggerWithValueSpell =
             unit->GetAuraEffectsByType(SPELL_AURA_PERIODIC_TRIGGER_SPELL_WITH_VALUE);
-        for (const Unit::AuraEffectList& list : {aurasPeriodicTriggerSpell, aurasPeriodicTriggerWithValueSpell})
+        for (Unit::AuraEffectList const& list : {aurasPeriodicTriggerSpell, aurasPeriodicTriggerWithValueSpell})
         {
             for (auto i = list.begin(); i != list.end(); ++i)
             {
                 AuraEffect* aurEff = *i;
-                const SpellInfo* spellInfo = aurEff->GetSpellInfo();
+                SpellInfo const* spellInfo = aurEff->GetSpellInfo();
                 if (!spellInfo)
                     continue;
-                const SpellInfo* triggerSpellInfo =
+                SpellInfo const* triggerSpellInfo =
                     sSpellMgr->GetSpellInfo(spellInfo->Effects[aurEff->GetEffIndex()].TriggerSpell);
                 if (!triggerSpellInfo)
                     continue;
@@ -2679,10 +2660,10 @@ float CombatFormationMoveAction::AverageGroupAngle(Unit* from, bool ranged, bool
     return atan2(sumY, sumX);
 }
 
-Position CombatFormationMoveAction::GetNearestPosition(const std::vector<Position>& positions)
+Position CombatFormationMoveAction::GetNearestPosition(std::vector<Position> const& positions)
 {
     Position result;
-    for (const Position& pos : positions)
+    for (Position const& pos : positions)
     {
         if (bot->GetExactDist(pos) < bot->GetExactDist(result))
             result = pos;

@@ -1,9 +1,11 @@
 /*
- * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
- * and/or modify it under version 3 of the License, or (at your option), any later version.
+ * This file is part of the mod-playerbots module for AzerothCore. See AUTHORS file for Copyright
+ * information; released under GNU GPL v2 license, redistribute/modify under version 2 of the License,
+ * or (at your option) any later version.
  */
 
 #include "PlayerbotMgr.h"
+#include "PlayerbotsDatabase.h"
 #include "BroadcastHelper.h"
 #include "ChannelMgr.h"
 #include "CharacterCache.h"
@@ -202,9 +204,10 @@ void PlayerbotHolder::AddPlayerBot(ObjectGuid playerGuid, uint32 masterAccountId
 
 bool PlayerbotHolder::IsAccountLinked(uint32 accountId, uint32 linkedAccountId)
 {
-    QueryResult result = PlayerbotsDatabase.Query(
-        "SELECT 1 FROM playerbots_account_links WHERE account_id = {} AND linked_account_id = {}", accountId, linkedAccountId);
-    return result != nullptr;
+    PlayerbotsDatabasePreparedStatement* stmt = PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_SEL_ACCOUNT_LINK);
+    stmt->SetData(0, accountId);
+    stmt->SetData(1, linkedAccountId);
+    return PlayerbotsDatabase.Query(stmt) != nullptr;
 }
 
 void PlayerbotHolder::HandlePlayerBotLoginCallback(PlayerbotLoginQueryHolder const& holder)
@@ -329,7 +332,7 @@ void PlayerbotMgr::CancelLogout()
         if (!botAI || IsSelfBot(bot))
             continue;
 
-        if (bot->GetSession()->isLogingOut())
+        if (bot->GetSession()->IsLoggingOut())
         {
             WorldPackets::Character::LogoutCancel data = WorldPacket(CMSG_LOGOUT_CANCEL);
             bot->GetSession()->HandleLogoutCancelOpcode(data);
@@ -349,7 +352,7 @@ void PlayerbotMgr::CancelLogout()
         if (botAI->GetMaster() != master)
             continue;
 
-        if (bot->GetSession()->isLogingOut())
+        if (bot->GetSession()->IsLoggingOut())
         {
             WorldPackets::Character::LogoutCancel data = WorldPacket(CMSG_LOGOUT_CANCEL);
             bot->GetSession()->HandleLogoutCancelOpcode(data);
@@ -380,7 +383,7 @@ void PlayerbotHolder::LogoutPlayerBot(ObjectGuid guid)
         WorldSession* botWorldSessionPtr = bot->GetSession();
         [[maybe_unused]] WorldSession* masterWorldSessionPtr = nullptr;     // Remove [[maybe_unused]] tag if timed logout implemented.
 
-        if (botWorldSessionPtr->isLogingOut())
+        if (botWorldSessionPtr->IsLoggingOut())
             return;
 
         Player* master = botAI->GetMaster();
@@ -1171,8 +1174,8 @@ std::vector<std::string> PlayerbotHolder::HandlePlayerbotCommand(char const* arg
             return messages;
         }
         uint8 teamId = master->GetTeamId(true);
-        const std::unordered_set<ObjectGuid> &guidCache = sRandomPlayerbotMgr.addclassCache[RandomPlayerbotMgr::GetTeamClassIdx(teamId == TEAM_ALLIANCE, claz)];
-        for (const ObjectGuid &guid: guidCache)
+        std::unordered_set<ObjectGuid> const& guidCache = sRandomPlayerbotMgr.addclassCache[RandomPlayerbotMgr::GetTeamClassIdx(teamId == TEAM_ALLIANCE, claz)];
+        for (ObjectGuid const& guid: guidCache)
         {
             // If the user requested a specific gender, skip any character that doesn't match.
             if (gender != -1 && GetOfflinePlayerGender(guid) != gender)
@@ -1798,7 +1801,7 @@ PlayerbotAI* PlayerbotsMgr::GetPlayerbotAI(Player* player)
     {
         return nullptr;
     }
-    // if (player->GetSession()->isLogingOut() || player->IsDuringRemoveFromWorld())
+    // if (player->GetSession()->IsLoggingOut() || player->IsDuringRemoveFromWorld())
     // {
     //     return nullptr;
     // }
@@ -1828,7 +1831,7 @@ PlayerbotMgr* PlayerbotsMgr::GetPlayerbotMgr(Player* player)
     return nullptr;
 }
 
-void PlayerbotMgr::HandleSetSecurityKeyCommand(Player* player, const std::string& key)
+void PlayerbotMgr::HandleSetSecurityKeyCommand(Player* player, std::string const& key)
 {
     uint32 accountId = player->GetSession()->GetAccountId();
 
@@ -1842,14 +1845,15 @@ void PlayerbotMgr::HandleSetSecurityKeyCommand(Player* player, const std::string
         hashedKey << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
 
     // Store the hashed key in the database
-    PlayerbotsDatabase.Execute(
-        "REPLACE INTO playerbots_account_keys (account_id, security_key) VALUES ({}, '{}')",
-        accountId, hashedKey.str());
+    PlayerbotsDatabasePreparedStatement* stmt = PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_REP_ACCOUNT_KEY);
+    stmt->SetData(0, accountId);
+    stmt->SetData(1, hashedKey.str());
+    PlayerbotsDatabase.Execute(stmt);
 
     ChatHandler(player->GetSession()).PSendSysMessage("Security key set successfully.");
 }
 
-void PlayerbotMgr::HandleLinkAccountCommand(Player* player, const std::string& accountName, const std::string& key)
+void PlayerbotMgr::HandleLinkAccountCommand(Player* player, std::string const& accountName, std::string const& key)
 {
     QueryResult result = LoginDatabase.Query("SELECT id FROM account WHERE username = '{}'", accountName);
     if (!result)
@@ -1861,8 +1865,10 @@ void PlayerbotMgr::HandleLinkAccountCommand(Player* player, const std::string& a
     Field* fields = result->Fetch();
     uint32 linkedAccountId = fields[0].Get<uint32>();
 
-    result = PlayerbotsDatabase.Query("SELECT security_key FROM playerbots_account_keys WHERE account_id = {}", linkedAccountId);
-    if (!result)
+    PlayerbotsDatabasePreparedStatement* keyStmt = PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_SEL_ACCOUNT_KEY);
+    keyStmt->SetData(0, linkedAccountId);
+    PreparedQueryResult keyResult = PlayerbotsDatabase.Query(keyStmt);
+    if (!keyResult)
     {
         ChatHandler(player->GetSession()).PSendSysMessage("Invalid security key.");
         return;
@@ -1878,7 +1884,7 @@ void PlayerbotMgr::HandleLinkAccountCommand(Player* player, const std::string& a
         hashedKey << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
 
     // Compare the hashed key with the stored hashed key
-    std::string storedKey = result->Fetch()->Get<std::string>();
+    std::string storedKey = keyResult->Fetch()->Get<std::string>();
     if (hashedKey.str() != storedKey)
     {
         ChatHandler(player->GetSession()).PSendSysMessage("Invalid security key.");
@@ -1886,12 +1892,15 @@ void PlayerbotMgr::HandleLinkAccountCommand(Player* player, const std::string& a
     }
 
     uint32 accountId = player->GetSession()->GetAccountId();
-    PlayerbotsDatabase.Execute(
-        "INSERT IGNORE INTO playerbots_account_links (account_id, linked_account_id) VALUES ({}, {})",
-        accountId, linkedAccountId);
-    PlayerbotsDatabase.Execute(
-        "INSERT IGNORE INTO playerbots_account_links (account_id, linked_account_id) VALUES ({}, {})",
-        linkedAccountId, accountId);
+    PlayerbotsDatabasePreparedStatement* linkStmt = PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_INS_ACCOUNT_LINK);
+    linkStmt->SetData(0, accountId);
+    linkStmt->SetData(1, linkedAccountId);
+    PlayerbotsDatabase.Execute(linkStmt);
+
+    linkStmt = PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_INS_ACCOUNT_LINK);
+    linkStmt->SetData(0, linkedAccountId);
+    linkStmt->SetData(1, accountId);
+    PlayerbotsDatabase.Execute(linkStmt);
 
     ChatHandler(player->GetSession()).PSendSysMessage("Account linked successfully.");
 }
@@ -1899,7 +1908,9 @@ void PlayerbotMgr::HandleLinkAccountCommand(Player* player, const std::string& a
 void PlayerbotMgr::HandleViewLinkedAccountsCommand(Player* player)
 {
     uint32 accountId = player->GetSession()->GetAccountId();
-    QueryResult result = PlayerbotsDatabase.Query("SELECT linked_account_id FROM playerbots_account_links WHERE account_id = {}", accountId);
+    PlayerbotsDatabasePreparedStatement* stmt = PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_SEL_ACCOUNT_LINKS_BY_ACCOUNT);
+    stmt->SetData(0, accountId);
+    PreparedQueryResult result = PlayerbotsDatabase.Query(stmt);
 
     if (!result)
     {
@@ -1927,7 +1938,7 @@ void PlayerbotMgr::HandleViewLinkedAccountsCommand(Player* player)
     } while (result->NextRow());
 }
 
-void PlayerbotMgr::HandleUnlinkAccountCommand(Player* player, const std::string& accountName)
+void PlayerbotMgr::HandleUnlinkAccountCommand(Player* player, std::string const& accountName)
 {
     QueryResult result = LoginDatabase.Query("SELECT id FROM account WHERE username = '{}'", accountName);
     if (!result)
@@ -1940,8 +1951,12 @@ void PlayerbotMgr::HandleUnlinkAccountCommand(Player* player, const std::string&
     uint32 linkedAccountId = fields[0].Get<uint32>();
     uint32 accountId = player->GetSession()->GetAccountId();
 
-    PlayerbotsDatabase.Execute("DELETE FROM playerbots_account_links WHERE (account_id = {} AND linked_account_id = {}) OR (account_id = {} AND linked_account_id = {})",
-                                accountId, linkedAccountId, linkedAccountId, accountId);
+    PlayerbotsDatabasePreparedStatement* stmt = PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_DEL_ACCOUNT_LINK);
+    stmt->SetData(0, accountId);
+    stmt->SetData(1, linkedAccountId);
+    stmt->SetData(2, linkedAccountId);
+    stmt->SetData(3, accountId);
+    PlayerbotsDatabase.Execute(stmt);
 
     ChatHandler(player->GetSession()).PSendSysMessage("Account unlinked successfully.");
 }

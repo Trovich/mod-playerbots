@@ -93,7 +93,7 @@ public:
         : WorldLocation(mapid, x, y, z, orientation)
     {
     }
-    WorldPosition(uint32 mapId, const Position& pos);
+    WorldPosition(uint32 mapId, Position const& pos);
     WorldPosition(WorldObject const* wo);
     WorldPosition(std::vector<WorldPosition*> list, WorldPositionConst conType);
     WorldPosition(std::vector<WorldPosition> list, WorldPositionConst conType);
@@ -102,9 +102,9 @@ public:
     WorldPosition(uint32 mapid, mGridCoord grid);
 
     //Setters
-    void set(const WorldLocation& pos);
-    void set(const WorldObject* wo);
-    void set(const WorldPosition& pos);
+    void set(WorldLocation const& pos);
+    void set(WorldObject const* wo);
+    void set(WorldPosition const& pos);
     void setMapId(uint32 id);
     void setX(float x);
     void setY(float y);
@@ -117,8 +117,8 @@ public:
 
     // Getters
     operator bool() const;
-    friend bool operator==(WorldPosition const& p1, const WorldPosition& p2);
-    friend bool operator!=(WorldPosition const& p1, const WorldPosition& p2);
+    friend bool operator==(WorldPosition const& p1, WorldPosition const& p2);
+    friend bool operator!=(WorldPosition const& p1, WorldPosition const& p2);
 
     WorldPosition& operator=(WorldPosition const&) = default;
     WorldPosition& operator+=(WorldPosition const& p1);
@@ -128,7 +128,7 @@ public:
     std::string const print();
 
     std::string const to_string();
-    std::vector<std::string> split(const std::string& s, char delimiter);
+    std::vector<std::string> split(std::string const& s, char delimiter);
 
     void printWKT(std::vector<WorldPosition> points, std::ostringstream& out, uint32 dim = 0, bool loop = false);
     void printWKT(std::ostringstream& out) { printWKT({*this}, out); }
@@ -1026,7 +1026,7 @@ public:
     bool GetCapitalPatrolPoint(uint32 zoneId, WorldPosition& out) const;
     std::vector<uint32> GetFlightNodesInZone(uint32 zoneId, TeamId team, uint32 excludeNode = 0) const;
     bool SelectAuctioneerByMap(Player* bot, NpcLocation& outAuctioneer);
-    const std::vector<WorldLocation>& GetLocsPerLevelCache(uint8 level) { return locsPerLevelCache[level]; }
+    std::vector<WorldLocation> const& GetLocsPerLevelCache(uint8 level) { return locsPerLevelCache[level]; }
 
     template <class D, class W, class URBG>
     void weighted_shuffle(D first, D last, W first_weight, W last_weight, URBG&& g)
@@ -1112,8 +1112,8 @@ private:
     TravelMgr() = default;
     ~TravelMgr() = default;
 
-    TravelMgr(const TravelMgr&) = delete;
-    TravelMgr& operator=(const TravelMgr&) = delete;
+    TravelMgr(TravelMgr const&) = delete;
+    TravelMgr& operator=(TravelMgr const&) = delete;
 
     TravelMgr(TravelMgr&&) = delete;
     TravelMgr& operator=(TravelMgr&&) = delete;
