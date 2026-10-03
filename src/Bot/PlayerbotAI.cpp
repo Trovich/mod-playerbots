@@ -261,7 +261,8 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     // entirely by the event module (ZombieInfestation::Mgr::UpdateBotZombieWander). Running the normal
     // strategy engine on top of it would keep sending the bot back to questing/grinding/following.
     // 43869 = "You're a Zombie!"; the aura is removed on death, cure or the bot's zombie timeout.
-    if (bot->HasAura(43869))
+    // 130725 = "Worgen Curse" (same module, WorgenCurse::Mgr::UpdateBotWorgen), removed only on death or cure.
+    if (bot->HasAura(43869) || bot->HasAura(130725))
         return;
 
     // Bots send no movement opcodes, so m_lastFallZ stays frozen and Player::IsFalling() (a Z test

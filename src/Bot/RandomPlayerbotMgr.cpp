@@ -1493,6 +1493,14 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
         return false;
     }
 
+    // Scourge Invasion 2008 (mod-scourge-invasion-2008): a bot that turned into a zombie is driven by the
+    // event module until it dies (43869 "You're a Zombie!" is removed on death). With its AI switched off
+    // (PlayerbotAI::UpdateAI) it always looks idle here, and Randomize() would strip every aura (the
+    // zombie form included) while Refresh()/RandomTeleportForLevel() would heal it and throw it across the
+    // world - leave it alone.
+    if (bot->HasAura(43869))
+        return false;
+
     // leave group if leader is rndbot
     Group* group = bot->GetGroup();
     if (group && !group->isLFGGroup() && IsRandomBot(group->GetLeader()))
