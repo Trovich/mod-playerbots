@@ -731,9 +731,20 @@ AiPlayerbot.GroupSmartTravelMinDist = 300
 # economy, and without this a low-gold bot simply stops at the flight master. 1 - on, 0 - off.
 AiPlayerbot.SmartTravelFreeFare = 1
 
-# While smart-travelling, sidestep idle hostile mobs that sit right on the path instead of
-# running straight through them (best-effort; PathGenerator-validated). 1 - on, 0 - off.
+# While smart-travelling, keep out of the aggro radius of idle hostile mobs on the way: the path
+# ahead (and the move already under way, a few times a second) is checked against every hostile
+# in sight, and the bot walks round the mob - or round its whole pack - on a navmesh-validated
+# detour. Where there is no way round (a gate, a bridge, a camp too wide) it takes the road as it
+# is. Mobs standing at the destination itself are not avoided. 1 - on, 0 - off.
 AiPlayerbot.SmartTravelAvoidEnemies = 1
+
+# With SmartTravelAvoidEnemies on, a follower that is out of combat and farther than this from
+# its master (yards, same map) walks to it the smart-travel way - round hostiles - instead of by
+# plain follow, which runs the shortest line through whatever stands on it. In combat
+# GroupSmartTravelMinDist still applies, so a bot is not pulled out of a fight. The walk hands
+# back to plain follow 60 yards from the master; values below 80 are treated as 80.
+# Default: 100
+AiPlayerbot.SmartTravelAvoidMinDist = 100
 
 # Allow a travelling bot to hop the part of the road it cannot walk. It never teleports to the
 # goal from afar: it hops to the next travel point on its own route - the flight master, the

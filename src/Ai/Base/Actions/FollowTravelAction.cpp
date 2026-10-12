@@ -227,18 +227,28 @@ namespace
         return len;
     }
 
-    // The point `dist` yards along the path (or its last point).
-    G3D::Vector3 PointAlong(Movement::PointsArray const& points, float dist)
+    // The first `dist` yards of the path (all of it when it is shorter). Its last point is where the bot walks to;
+    // the points before it are what it passes on the way.
+    Movement::PointsArray LegAlong(Movement::PointsArray const& points, float dist)
     {
+        Movement::PointsArray leg;
+        if (points.empty())
+            return leg;
+
+        leg.push_back(points.front());
         for (size_t i = 1; i < points.size(); ++i)
         {
             float const seg = (points[i] - points[i - 1]).length();
             if (seg >= dist && seg > 0.0f)
-                return points[i - 1] + (points[i] - points[i - 1]) * (dist / seg);
+            {
+                leg.push_back(points[i - 1] + (points[i] - points[i - 1]) * (dist / seg));
+                return leg;
+            }
 
+            leg.push_back(points[i]);
             dist -= seg;
         }
-        return points.back();
+        return leg;
     }
 
     // Detour can only route through map tiles that are loaded, and tiles load with the grids around players. A leg
@@ -277,8 +287,10 @@ namespace
     // 2. Otherwise - the destination's tile is not loaded yet, or it sits off the mesh - aim at points toward it
     //    inside the loaded area and take the route that ends nearest the destination, detours penalised. The old
     //    random cone sampler happily walked bots out of the back gate of a keep and away from the goal.
+    //
+    // `leg` is the stretch of that route up to the waypoint - what the bot is about to walk.
     bool NextRouteStep(Player* bot, WorldPosition const& dest, WorldPosition& out, bool& onRoute,
-                       float& routeLength)
+                       float& routeLength, Movement::PointsArray& leg)
     {
         float const distToDest = bot->GetExactDist(dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
 
@@ -295,7 +307,8 @@ namespace
 
                 if (complete || endGap + MIN_STEP_GAIN < distToDest || length >= 2.0f * WALK_STEP_DIS)
                 {
-                    G3D::Vector3 const step = PointAlong(points, WALK_STEP_DIS);
+                    leg = LegAlong(points, WALK_STEP_DIS);
+                    G3D::Vector3 const& step = leg.back();
                     out = WorldPosition(bot->GetMapId(), step.x, step.y, step.z);
                     onRoute = complete;
                     routeLength = length;  // only meaningful for a complete route: what is left of the way
@@ -345,7 +358,8 @@ namespace
                 if (score >= bestScore)
                     continue;
 
-                G3D::Vector3 const step = PointAlong(points, WALK_STEP_DIS);
+                leg = LegAlong(points, WALK_STEP_DIS);
+                G3D::Vector3 const& step = leg.back();
                 bestScore = score;
                 found = true;
                 out = WorldPosition(bot->GetMapId(), step.x, step.y, step.z);
@@ -426,76 +440,375 @@ namespace
         return moved > std::max(REPLAN_MOVE_DIS, 0.3f * botToGoal);
     }
 
-    constexpr float AVOID_BAND = 16.0f;       // hostile this close to the path line is "in the way"
-    constexpr float AVOID_LOOKAHEAD = 45.0f;  // ...and this far ahead of the bot
-    constexpr float AVOID_SHIFT = 20.0f;      // sidestep this far to the clear side
-    constexpr float AVOID_STEP = 24.0f;       // shortened forward step while dodging
+    constexpr float AVOID_MARGIN = 5.0f;         // pass this far outside a hostile's aggro radius
+    constexpr float AVOID_MOVING_MARGIN = 4.0f;  // ...and this much more when it is walking about
+    constexpr float AVOID_MAX_RADIUS = 45.0f;    // the core's own cap on an aggro radius
+    constexpr float AVOID_HELD_RADIUS = 10.0f;   // a rooted one the bot left behind only reaches this far
+    constexpr float AVOID_MIN_RADIUS = 3.0f;     // closer than this there is nothing left to avoid
+    constexpr float AVOID_Z_RANGE = 12.0f;       // a hostile this far above / below the path does not see the bot
+    constexpr float AVOID_LOOKAHEAD = 60.0f;     // how far along the path a hostile counts as "in the way"
+    constexpr float AVOID_TANGENT_PAD = 3.0f;    // aim a detour this far outside the circle it rounds
+    constexpr float AVOID_PACK_GAP = 6.0f;       // hostiles whose circles are this close cannot be passed between
+    constexpr float AVOID_MIN_DETOUR = 8.0f;     // a detour point nearer than this is not worth a move
+    constexpr float AVOID_MAX_DETOUR = 110.0f;   // ...and one farther than this is no detour
+    constexpr float AVOID_MIN_GAIN = 4.0f;       // a detour that still clips a radius must clip it this much less
+    constexpr float AVOID_SPOT_MISS = 4.0f;      // a path ending this far from the spot it was sent to did not reach it
+    constexpr uint8 AVOID_MAX_PATHS = 8;         // path queries spent on one search for a way round
+    constexpr uint8 AVOID_MAX_DETOURS = 5;       // detours in a row that bring the bot no nearer: then it pushes on
+    constexpr uint32 AVOID_SCAN_MS = 400;        // how often a move under way is checked for hostiles on it
+    constexpr uint32 AVOID_RETRY_MS = 3000;      // ...and how long a path known to clip one is left alone
+    constexpr uint32 AVOID_DETOUR_MEMORY_MS = 20000;  // detours older than this no longer count as "in a row"
 
-    // If an idle hostile NPC sits right on the bot -> (tx,ty) line just ahead, return a waypoint sidestepped to the
-    // clearer side (PathGenerator-validated), so the bot rounds the pack instead of running through it. Returns the
-    // input unchanged when nothing blocks or no safe detour exists.
-    WorldPosition AvoidHostiles(PlayerbotAI* botAI, Player* bot, float tx, float ty, float tz)
+    // An idle hostile the bot would pull by passing within `radius` of it.
+    struct Threat
     {
-        WorldPosition original(bot->GetMapId(), tx, ty, tz);
+        float x;
+        float y;
+        float z;
+        float radius;
+    };
+
+    // How deep a path runs into the hostiles' radii.
+    struct PathRisk
+    {
+        float penetration = 0.0f;  // deepest it goes into any radius; 0 = it stays clear of all of them
+        int32 blocker = -1;        // index of the hostile whose radius it enters first
+    };
+
+    struct DetourSpot
+    {
+        float x;
+        float y;
+        float cost;  // yards to the spot plus on to where the bot was heading
+    };
+
+    // The hostiles a travelling bot has to keep away from. The old sidestep looked at a 16 yard band along a straight
+    // line - less than an aggro radius - and only once per 90 yard step, so most of what stood on the road was never
+    // looked at; and with as many hostiles to the left as to the right it did nothing at all.
+    //
+    // `dest` is where the leg leads: a hostile it lies within reach of has to be passed anyway.
+    void CollectThreats(PlayerbotAI* botAI, Player* bot, WorldPosition const& dest, std::vector<Threat>& out)
+    {
         if (!sPlayerbotAIConfig.smartTravelAvoidEnemies)
-            return original;
+            return;
 
-        GuidVector hostiles = botAI->GetAiObjectContext()->GetValue<GuidVector>("nearest hostile npcs")->Get();
-        if (hostiles.empty())
-            return original;
-
-        float const bx = bot->GetPositionX();
-        float const by = bot->GetPositionY();
-        float dx = tx - bx;
-        float dy = ty - by;
-        float const segLen = std::sqrt(dx * dx + dy * dy);
-        if (segLen < 8.0f)
-            return original;
-
-        float const ux = dx / segLen;
-        float const uy = dy / segLen;
-        float const px = -uy;  // left-hand normal
-        float const py = ux;
-
-        float sideBias = 0.0f;  // >0 => hostiles mostly on the left, push right
+        GuidVector const hostiles = botAI->GetAiObjectContext()->GetValue<GuidVector>("nearest hostile npcs")->Get();
         for (ObjectGuid const& guid : hostiles)
         {
-            Unit* h = botAI->GetUnit(guid);
-            if (!h || !h->IsAlive())
+            Unit* unit = botAI->GetUnit(guid);
+            Creature* creature = unit ? unit->ToCreature() : nullptr;
+            if (!creature || !creature->IsAlive() || creature->IsInEvadeMode())
+                continue;
+
+            // Nothing that would not come for the bot on its own.
+            if (creature->IsCivilian() || creature->IsTrigger() || creature->IsCritter() || creature->IsTotem() ||
+                creature->IsImmuneToPC() || creature->IsNeutralToAll() || !creature->HasReactState(REACT_AGGRESSIVE))
                 continue;
 
             // An idle one is what the bot rounds to keep it idle. One already fighting is not in the way - it
             // leashes once outrun - unless it is held where it stands (the root the bot left behind): the route
             // runs right past it and it still swings at anything within reach.
-            if (h->IsInCombat() && !h->HasRootAura())
+            float radius = 0.0f;
+            if (!creature->IsInCombat())
+            {
+                radius = creature->GetAggroRange(bot) + AVOID_MARGIN;
+                if (creature->isMoving())
+                    radius += AVOID_MOVING_MARGIN;
+                radius = std::min(radius, AVOID_MAX_RADIUS);
+            }
+            else if (creature->HasRootAura())
+                radius = AVOID_HELD_RADIUS;
+            else
                 continue;
 
-            float const hx = h->GetPositionX() - bx;
-            float const hy = h->GetPositionY() - by;
-            float const along = hx * ux + hy * uy;
-            if (along < 2.0f || along > std::min(segLen, AVOID_LOOKAHEAD))
+            // Inside the radius already: what counts from here on is not getting any closer.
+            radius = std::min(radius, bot->GetExactDist2d(creature) - 2.0f);
+            if (radius < AVOID_MIN_RADIUS)
                 continue;
 
-            float const lateral = hx * px + hy * py;
-            if (std::fabs(lateral) < AVOID_BAND)
-                sideBias += (lateral >= 0.0f) ? 1.0f : -1.0f;
+            if (dest.GetExactDist2d(creature->GetPositionX(), creature->GetPositionY()) < radius)
+                continue;
+
+            Threat threat;
+            threat.x = creature->GetPositionX();
+            threat.y = creature->GetPositionY();
+            threat.z = creature->GetPositionZ();
+            threat.radius = radius;
+            out.push_back(threat);
+        }
+    }
+
+    // Checks the first `maxLen` yards of a path against the hostiles.
+    PathRisk AssessPath(Movement::PointsArray const& points, float maxLen, std::vector<Threat> const& threats)
+    {
+        PathRisk risk;
+        float firstEntry = FLT_MAX;
+        for (size_t t = 0; t < threats.size(); ++t)
+        {
+            Threat const& threat = threats[t];
+            float along = 0.0f;
+            for (size_t i = 1; i < points.size() && along < maxLen; ++i)
+            {
+                G3D::Vector3 const& a = points[i - 1];
+                G3D::Vector3 b = points[i];
+                float seg = (b - a).length();
+                if (seg <= 0.0f)
+                    continue;
+
+                if (along + seg > maxLen)
+                {
+                    b = a + (b - a) * ((maxLen - along) / seg);
+                    seg = maxLen - along;
+                }
+
+                // Closest point of the segment to the hostile, seen from above.
+                float const dx = b.x - a.x;
+                float const dy = b.y - a.y;
+                float const len2 = dx * dx + dy * dy;
+                float u = len2 > 0.0f ? ((threat.x - a.x) * dx + (threat.y - a.y) * dy) / len2 : 0.0f;
+                u = std::clamp(u, 0.0f, 1.0f);
+
+                float const gapX = threat.x - (a.x + dx * u);
+                float const gapY = threat.y - (a.y + dy * u);
+                float const gap = std::sqrt(gapX * gapX + gapY * gapY);
+                float const height = a.z + (b.z - a.z) * u;
+                if (gap < threat.radius && std::fabs(threat.z - height) <= AVOID_Z_RANGE)
+                {
+                    risk.penetration = std::max(risk.penetration, threat.radius - gap);
+                    float const entry = along + seg * u;
+                    if (entry < firstEntry)
+                    {
+                        firstEntry = entry;
+                        risk.blocker = static_cast<int32>(t);
+                    }
+                }
+
+                along += seg;
+            }
+        }
+        return risk;
+    }
+
+    // What is left of the move the bot is making right now, from where it stands.
+    bool CommittedPath(Player* bot, Movement::PointsArray& out)
+    {
+        Movement::MoveSpline const* spline = bot->movespline;
+        if (!spline || !spline->Initialized() || spline->Finalized() || spline->onTransport)
+            return false;
+
+        Movement::MoveSpline::MySpline const& curve = spline->_Spline();
+        out.emplace_back(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+        for (int32 i = spline->_currentSplineIdx() + 1; i <= curve.last() && i < curve.getPointCount(); ++i)
+            out.push_back(curve.getPoint(i));
+
+        return out.size() >= 2;
+    }
+
+    // Where the two tangents from the bot touch a circle, and two more spots further out along each tangent. The
+    // straight line to a tangent point never comes inside the circle; the spots further out are the ones from which
+    // the way on to `aim` clears it as well.
+    void AddTangentSpots(Player* bot, float cx, float cy, float radius, WorldPosition const& aim,
+                         std::vector<DetourSpot>& out)
+    {
+        static float const SIDES[] = { 1.0f, -1.0f };
+        static float const EXTRA[] = { 0.0f, 15.0f, 30.0f };
+
+        float const bx = bot->GetPositionX();
+        float const by = bot->GetPositionY();
+        float const dx = cx - bx;
+        float const dy = cy - by;
+        float const dist = std::sqrt(dx * dx + dy * dy);
+        if (dist < 1.0f)
+            return;
+
+        // Standing inside the padded circle already: skirt it from where the bot is.
+        float const r = std::min(radius + AVOID_TANGENT_PAD, dist - 0.5f);
+        float const base = std::atan2(dy, dx);
+        float const spread = std::asin(std::clamp(r / dist, 0.0f, 1.0f));
+        float const reach = std::sqrt(std::max(0.0f, dist * dist - r * r));
+
+        for (float const side : SIDES)
+            for (float const extra : EXTRA)
+            {
+                float const len = reach + extra;
+                if (len < AVOID_MIN_DETOUR || len > AVOID_MAX_DETOUR)
+                    continue;
+
+                DetourSpot spot;
+                spot.x = bx + std::cos(base + side * spread) * len;
+                spot.y = by + std::sin(base + side * spread) * len;
+                spot.cost = len + aim.GetExactDist2d(spot.x, spot.y);
+                out.push_back(spot);
+            }
+    }
+
+    // The pack hostile `seed` stands in - everything chained to it by circles too close together to pass between -
+    // as one circle that holds them all. False when it stands alone.
+    bool PackCircle(std::vector<Threat> const& threats, size_t seed, float& cx, float& cy, float& radius)
+    {
+        std::vector<size_t> pack{ seed };
+        std::vector<bool> taken(threats.size(), false);
+        taken[seed] = true;
+        for (size_t p = 0; p < pack.size(); ++p)
+            for (size_t t = 0; t < threats.size(); ++t)
+            {
+                if (taken[t])
+                    continue;
+
+                Threat const& a = threats[pack[p]];
+                Threat const& b = threats[t];
+                float const dx = a.x - b.x;
+                float const dy = a.y - b.y;
+                if (std::sqrt(dx * dx + dy * dy) >= a.radius + b.radius + AVOID_PACK_GAP)
+                    continue;
+
+                taken[t] = true;
+                pack.push_back(t);
+            }
+
+        if (pack.size() < 2)
+            return false;
+
+        cx = 0.0f;
+        cy = 0.0f;
+        for (size_t const t : pack)
+        {
+            cx += threats[t].x;
+            cy += threats[t].y;
+        }
+        cx /= static_cast<float>(pack.size());
+        cy /= static_cast<float>(pack.size());
+
+        radius = 0.0f;
+        for (size_t const t : pack)
+        {
+            float const dx = threats[t].x - cx;
+            float const dy = threats[t].y - cy;
+            radius = std::max(radius, std::sqrt(dx * dx + dy * dy) + threats[t].radius);
+        }
+        return true;
+    }
+
+    // A point to walk to first, so that the bot rounds the hostiles its way to `aim` runs into (`risk` is that way's
+    // assessment). Round the one it would meet first, or round its whole pack; the cheapest spot the bot can really
+    // walk to without entering any radius wins. With no such spot, the one that clips a radius least - when that is
+    // really better than going straight on. `clear` tells which of the two it is.
+    bool FindDetour(Player* bot, std::vector<Threat> const& threats, PathRisk const& risk, WorldPosition const& aim,
+                    WorldPosition& out, bool& clear)
+    {
+        clear = false;
+        Map* map = bot->GetMap();
+        if (!map || risk.blocker < 0)
+            return false;
+
+        std::vector<DetourSpot> spots;
+        Threat const& blocker = threats[risk.blocker];
+        AddTangentSpots(bot, blocker.x, blocker.y, blocker.radius, aim, spots);
+
+        float packX = 0.0f;
+        float packY = 0.0f;
+        float packRadius = 0.0f;
+        if (PackCircle(threats, static_cast<size_t>(risk.blocker), packX, packY, packRadius))
+            AddTangentSpots(bot, packX, packY, packRadius, aim, spots);
+
+        std::sort(spots.begin(), spots.end(),
+                  [](DetourSpot const& a, DetourSpot const& b) { return a.cost < b.cost; });
+
+        uint32 const phase = bot->GetPhaseMask();
+        G3D::Vector3 const from(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+        G3D::Vector3 const to(aim.GetPositionX(), aim.GetPositionY(), aim.GetPositionZ());
+
+        bool haveClear = false;  // a spot reached without entering a radius (the way on from it may still clip one)
+        bool haveLeast = false;  // a spot reached by clipping a radius less than the straight way does
+        float leastPenetration = risk.penetration - AVOID_MIN_GAIN;
+        WorldPosition clearSpot;
+        WorldPosition leastSpot;
+        uint8 queries = 0;
+        for (DetourSpot const& spot : spots)
+        {
+            if (queries >= AVOID_MAX_PATHS)
+                break;
+
+            if (!Acore::IsValidMapCoord(spot.x, spot.y))
+                continue;
+
+            float const z = map->GetHeight(phase, spot.x, spot.y, from.z + 15.0f, true, 40.0f);
+            if (z <= INVALID_HEIGHT || map->IsInWater(phase, spot.x, spot.y, z, bot->GetCollisionHeight()))
+                continue;
+
+            // The straight line there tells most of it, and costs no path query.
+            Movement::PointsArray const line{ from, G3D::Vector3(spot.x, spot.y, z) };
+            float const linePenetration = AssessPath(line, FLT_MAX, threats).penetration;
+            if (linePenetration > 0.0f && (haveClear || linePenetration >= leastPenetration))
+                continue;
+
+            ++queries;
+            PathGenerator path(bot);
+            CalculateRoute(path, spot.x, spot.y, z);
+            if (!PathWalkable(path))
+                continue;
+
+            // The navmesh has to lead to the spot itself, and not by some other way round.
+            Movement::PointsArray const& points = path.GetPath();
+            G3D::Vector3 const& end = path.GetActualEndPosition();
+            float const missX = end.x - spot.x;
+            float const missY = end.y - spot.y;
+            if (std::sqrt(missX * missX + missY * missY) > AVOID_SPOT_MISS ||
+                PathLength(points) > 1.5f * (end - from).length() + 10.0f)
+                continue;
+
+            WorldPosition const reached(bot->GetMapId(), end.x, end.y, end.z);
+            float const penetration = AssessPath(points, FLT_MAX, threats).penetration;
+            if (penetration > 0.0f)
+            {
+                if (!haveClear && penetration < leastPenetration)
+                {
+                    leastPenetration = penetration;
+                    leastSpot = reached;
+                    haveLeast = true;
+                }
+                continue;
+            }
+
+            // Clear all the way to the spot. The first such spot from which the way on is clear too is the one:
+            // as the crow flies first, then - only when that looks clear - as the navmesh really leads, which is
+            // what catches the gate or the bridge behind a hostile that brings the road straight back to it.
+            Movement::PointsArray const onward{ end, to };
+            if (AssessPath(onward, AVOID_LOOKAHEAD, threats).blocker < 0 && queries < AVOID_MAX_PATHS)
+            {
+                ++queries;
+                PathGenerator next(bot);
+                next.SetUseStraightPath(true);
+                next.CalculatePath(end.x, end.y, end.z, to.x, to.y, to.z, false);
+                if (PathWalkable(next) && AssessPath(next.GetPath(), AVOID_LOOKAHEAD, threats).blocker < 0)
+                {
+                    out = reached;
+                    clear = true;
+                    return true;
+                }
+            }
+
+            if (!haveClear)
+            {
+                clearSpot = reached;
+                haveClear = true;
+            }
         }
 
-        if (sideBias == 0.0f)
-            return original;
+        if (haveClear)
+        {
+            out = clearSpot;
+            clear = true;
+            return true;
+        }
 
-        float const sign = sideBias > 0.0f ? -1.0f : 1.0f;  // steer away from the crowded side
-        float const step = std::min(segLen, AVOID_STEP);
-        float const nx = bx + ux * step + px * sign * AVOID_SHIFT;
-        float const ny = by + uy * step + py * sign * AVOID_SHIFT;
+        if (haveLeast)
+        {
+            out = leastSpot;
+            return true;
+        }
 
-        PathGenerator gen(bot);
-        gen.CalculatePath(nx, ny, tz);
-        if (!PathWalkable(gen) || (gen.GetPathType() & ~(PATHFIND_NORMAL | PATHFIND_INCOMPLETE)))
-            return original;  // detour not walkable - keep the straight line
-
-        G3D::Vector3 const& end = gen.GetActualEndPosition();
-        return WorldPosition(bot->GetMapId(), end.x, end.y, end.z);
+        return false;
     }
 }
 
@@ -616,7 +929,16 @@ bool FollowTravelTrigger::IsActive()
 
     // Past the follow distance the planner always has a move: fly, follow the portal / taxi / ferry chain to the
     // goal's region, or walk. Handing this to plain follow would beeline straight through terrain and water.
-    return !sameMap || dist2d > sPlayerbotAIConfig.groupSmartTravelMinDist;
+    //
+    // Out of combat the walk takes over much sooner when it is to go round hostiles: plain follow runs the shortest
+    // navmesh line through whatever stands on it, which is how a bot invited from across a camp arrived with the
+    // whole camp behind it. In combat the long distance holds, so a bot is not pulled out of a fight it is in just
+    // because its master stepped away.
+    float minDist = sPlayerbotAIConfig.groupSmartTravelMinDist;
+    if (!inCombat && sPlayerbotAIConfig.smartTravelAvoidEnemies)
+        minDist = std::min(minDist, std::max(sPlayerbotAIConfig.smartTravelAvoidMinDist, ARRIVE_DIS + 20.0f));
+
+    return !sameMap || dist2d > minDist;
 }
 
 bool FollowTravelAction::isUseful()
@@ -1427,22 +1749,42 @@ bool FollowTravelAction::TravelFarTo(FollowTravelState& st, WorldPosition const&
         PreloadRouteGrids(bot, dest);
     }
 
-    if (IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL))
-        return true;
-
-    // Let a committed spline on the same map finish before recomputing (anti-oscillation,
-    // as in NewRpgBaseAction::MoveFarTo).
-    {
-        LastMovement& lm = AI_VALUE(LastMovement&, "last movement");
-        if (bot->isMoving() && lm.lastMoveToMapId == bot->GetMapId())
-        {
-            float const remaining = bot->GetExactDist(lm.lastMoveToX, lm.lastMoveToY, lm.lastMoveToZ);
-            if (remaining > 10.0f)
-                return true;
-        }
-    }
-
     uint32 const now = getMSTime();
+    LastMovement& lm = AI_VALUE(LastMovement&, "last movement");
+
+    // Detours count against the bot only while they are recent.
+    if (st.detours && now > st.detoursUntilMs)
+        st.detours = 0;
+
+    // A move is under way: the wait the last MoveTo asked for, or - that wait is capped at a few seconds - a spline
+    // still running toward its point on this map. Let it finish before recomputing (anti-oscillation, as in
+    // NewRpgBaseAction::MoveFarTo)...
+    bool underWay = IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL);
+    if (!underWay && bot->isMoving() && lm.lastMoveToMapId == bot->GetMapId())
+        underWay = bot->GetExactDist(lm.lastMoveToX, lm.lastMoveToY, lm.lastMoveToZ) > 10.0f;
+
+    // ...unless a hostile stands on what is left of it. A step is 90 yards of road: one that was clear when the bot
+    // set out is not checked again for the next ten seconds otherwise, and whatever shows up on it meanwhile - the
+    // far half of the step was out of sight, a patrol walked in - is run straight into.
+    std::vector<Threat> threats;
+    bool rerouting = false;
+    if (underWay)
+    {
+        if (!sPlayerbotAIConfig.smartTravelAvoidEnemies || !bot->isMoving() || st.detours >= AVOID_MAX_DETOURS ||
+            lm.priority > MovementPriority::MOVEMENT_NORMAL || now < st.nextAvoidScanMs)
+            return true;
+
+        st.nextAvoidScanMs = now + AVOID_SCAN_MS;
+        CollectThreats(botAI, bot, dest, threats);
+
+        Movement::PointsArray rest;
+        if (threats.empty() || !CommittedPath(bot, rest) || AssessPath(rest, AVOID_LOOKAHEAD, threats).blocker < 0)
+            return true;
+
+        rerouting = true;
+    }
+    else if (st.detours < AVOID_MAX_DETOURS)
+        CollectThreats(botAI, bot, dest, threats);
 
     // Swimming for a long stretch means the leg is crossing open water the navmesh cannot solve - that is how a bot
     // ends up swimming a lake or an ocean under the terrain. Report a stall so the caller can retry or hop.
@@ -1479,8 +1821,9 @@ bool FollowTravelAction::TravelFarTo(FollowTravelState& st, WorldPosition const&
     WorldPosition step;
     bool onRoute = false;
     float routeLength = 0.0f;
+    Movement::PointsArray leg;
     bool const haveStep =
-        distToDest >= PATHFINDER_DIS && NextRouteStep(bot, dest, step, onRoute, routeLength);
+        distToDest >= PATHFINDER_DIS && NextRouteStep(bot, dest, step, onRoute, routeLength, leg);
     bool const routeMetric = haveStep && onRoute;
     float const progress = routeMetric ? routeLength : distToDest;
 
@@ -1492,6 +1835,10 @@ bool FollowTravelAction::TravelFarTo(FollowTravelState& st, WorldPosition const&
     }
     else if (progress + 5.0f < st.nearestMoveFarDis)
     {
+        // Nearer than it has been on this leg (the first reading of a leg is not that).
+        if (st.nearestMoveFarDis < FLT_MAX)
+            st.detours = 0;
+
         st.nearestMoveFarDis = progress;
         st.stuckSinceMs = now;
         st.stuckAttempts = 0;
@@ -1511,22 +1858,91 @@ bool FollowTravelAction::TravelFarTo(FollowTravelState& st, WorldPosition const&
         return false;
     }
 
-    // A refused move (rooted, mid-cast, the same point twice) is not a stall - the timer above decides that.
+    // Where to walk now: straight to the target when it is near, else the next step of the route.
+    WorldPosition aim;
     if (distToDest < PATHFINDER_DIS)
     {
-        WorldPosition wp = AvoidHostiles(botAI, bot, dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
-        MoveTo(wp.GetMapId(), wp.GetPositionX(), wp.GetPositionY(), wp.GetPositionZ(), false, false, false, true);
-        return true;
-    }
+        aim = dest;
+        leg.clear();
+        if (!threats.empty())
+        {
+            PathGenerator path(bot);
+            CalculateRoute(path, dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
+            if (PathWalkable(path))
+                leg = path.GetPath();
+        }
 
-    if (!haveStep)
+        if (leg.size() < 2)
+        {
+            leg.clear();
+            leg.emplace_back(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+            leg.emplace_back(dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
+        }
+    }
+    else if (!haveStep)
     {
         st.nextStepSearchMs = now + STEP_SEARCH_RETRY_MS;
         return true;  // nothing usable this tick, but not declared stuck yet
     }
+    else
+    {
+        st.nextStepSearchMs = 0;
+        aim = step;
+    }
 
-    st.nextStepSearchMs = 0;
-    WorldPosition wp = AvoidHostiles(botAI, bot, step.GetPositionX(), step.GetPositionY(), step.GetPositionZ());
-    MoveTo(bot->GetMapId(), wp.GetPositionX(), wp.GetPositionY(), wp.GetPositionZ(), false, false, false, true);
+    // Hostiles on that stretch: go round them.
+    WorldPosition target = aim;
+    bool noWayRound = false;
+    if (!threats.empty())
+    {
+        PathRisk const risk = AssessPath(leg, AVOID_LOOKAHEAD, threats);
+        if (risk.blocker >= 0)
+        {
+            WorldPosition detour;
+            bool clear = false;
+            if (FindDetour(bot, threats, risk, aim, detour, clear))
+            {
+                target = detour;
+
+                // A detour gains nothing on the target for a while, by design: it must not read as a stalled leg.
+                // Only so many in a row, though. A bot that has gone round and round and is no nearer stands before
+                // something it cannot round - the only door, a bridge - and from then on it takes the road as it
+                // is, until it gets nearer again or a while has passed.
+                ++st.detours;
+                st.detoursUntilMs = now + AVOID_DETOUR_MEMORY_MS;
+                st.stuckSinceMs = now;
+                st.stuckAttempts = 0;
+
+                LOG_DEBUG("playerbots",
+                          "[FollowTravel] {}: {} hostile(s) near, one {:.0f}y into the way - {} via ({:.0f},{:.0f})",
+                          bot->GetName(), threats.size(), risk.penetration, clear ? "going round" : "squeezing past",
+                          detour.GetPositionX(), detour.GetPositionY());
+            }
+            else
+            {
+                noWayRound = true;
+                LOG_DEBUG("playerbots",
+                          "[FollowTravel] {}: {} hostile(s) near, one {:.0f}y into the way - no way round",
+                          bot->GetName(), threats.size(), risk.penetration);
+            }
+
+            // The path taken clips a radius knowingly: looking at it again every scan would only find the same.
+            if (!clear)
+                st.nextAvoidScanMs = now + AVOID_RETRY_MS;
+        }
+    }
+
+    if (rerouting)
+    {
+        // Nothing better than the move already under way.
+        if (noWayRound)
+            return true;
+
+        lm.lastdelayTime = 0.0f;  // that move is still being waited for, and MoveTo would refuse to replace it
+    }
+
+    // A refused move (rooted, mid-cast, the same point twice) is not a stall - the timer above decides that.
+    MoveTo(bot->GetMapId(), target.GetPositionX(), target.GetPositionY(), target.GetPositionZ(), false, false, false,
+           true);
     return true;
 }

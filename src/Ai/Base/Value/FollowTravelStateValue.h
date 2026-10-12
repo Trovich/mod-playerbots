@@ -111,6 +111,13 @@ public:
     // No stepping stone found last tick: the next search (a couple of dozen path queries) waits until then.
     uint32 nextStepSearchMs = 0;
 
+    // Going round hostiles: when the move under way is next checked for one standing on it, and how many detours
+    // the bot has taken lately without getting nearer its target (after a few it stops going round). These belong
+    // to the trip, not the leg: the target of a leg toward a walking master changes every tick.
+    uint32 nextAvoidScanMs = 0;
+    uint8 detours = 0;
+    uint32 detoursUntilMs = 0;
+
     // The human we travel toward is loading into a new place since then; 0 = not waiting.
     uint32 pendingSinceMs = 0;
 

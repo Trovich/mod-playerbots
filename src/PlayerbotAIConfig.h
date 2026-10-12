@@ -480,6 +480,8 @@ public:
     // master, use inter-city portal hubs, then walk in) instead of beelining
     bool groupSmartTravel;
     float groupSmartTravelMinDist;
+    // out of combat, with smartTravelAvoidEnemies on, the walk to the master takes over from this distance already
+    float smartTravelAvoidMinDist;
     // cover the taxi fare when a smart-travelling bot cannot afford it (bots are not
     // economy-relevant; without this a broke bot just stops at the flight master)
     bool smartTravelFreeFare;

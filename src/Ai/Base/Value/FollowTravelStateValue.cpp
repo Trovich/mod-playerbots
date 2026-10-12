@@ -44,6 +44,9 @@ void FollowTravelState::Clear()
     legFails = 0;
     progressIsRoute = false;
     nextStepSearchMs = 0;
+    nextAvoidScanMs = 0;
+    detours = 0;
+    detoursUntilMs = 0;
     pendingSinceMs = 0;
     nextMountPokeMs = 0;
     disabledEnemies.clear();

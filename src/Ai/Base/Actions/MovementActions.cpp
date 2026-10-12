@@ -850,7 +850,8 @@ bool MovementAction::ReachCombatTo(Unit* target, float distance)
             tz = target->GetPositionZ();
         }
     }
-    float combatDistance = bot->GetCombatReach() + target->GetCombatReach();
+    // directional: a model may reach less far ahead of itself than behind (Unit::GetCombatReachToward)
+    float combatDistance = bot->GetCombatReachToward(target) + target->GetCombatReachToward(bot);
     distance += combatDistance;
 
     if (bot->GetExactDist(tx, ty, tz) <= distance)
