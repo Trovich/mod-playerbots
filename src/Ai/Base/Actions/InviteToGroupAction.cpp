@@ -142,6 +142,14 @@ bool InviteNearbyToGroupAction::isUseful()
     if (grouperType == GrouperType::SOLO || grouperType == GrouperType::MEMBER)
         return false;
 
+    // A fifth of all bots are leaders by type (the top 20 of the bot's number, see GetGrouperType). With all of
+    // them gathering groups of up to five, nearly every bot of a zone is in somebody's party and a player
+    // finds nobody left to invite. Only RandomBotGroupNearbyLeaderPct of the bots really gather one - the top
+    // of the same number.
+    uint32 leaderPct = std::min<uint32>(PlayerbotAIConfig::instance().randomBotGroupNearbyLeaderPct, 20);
+    if (botAI->GetStableBotNumber(100) < 100 - leaderPct)
+        return false;
+
     Group* group = bot->GetGroup();
 
     if (group)
@@ -154,7 +162,7 @@ bool InviteNearbyToGroupAction::isUseful()
 
         uint32 memberCount = group->GetMembersCount();
 
-        if (memberCount >= uint8(grouperType))
+        if (memberCount >= std::min<uint32>(uint8(grouperType), PlayerbotAIConfig::instance().randomBotGroupNearbyMaxSize))
             return false;
     }
 

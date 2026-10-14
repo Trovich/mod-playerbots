@@ -803,6 +803,8 @@ bool PlayerbotAIConfig::Initialize()
     randomBotConcentrateInPlayerZone =
         sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotConcentrateInPlayerZone", false);
     randomBotGroupNearby = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotGroupNearby", false);
+    randomBotGroupNearbyLeaderPct = sConfigMgr->GetOption<uint32>("AiPlayerbot.RandomBotGroupNearbyLeaderPct", 5);
+    randomBotGroupNearbyMaxSize = sConfigMgr->GetOption<uint32>("AiPlayerbot.RandomBotGroupNearbyMaxSize", 3);
 
     // arena
     randomBotArenaTeam2v2Count = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotArenaTeam2v2Count", 10);

@@ -112,7 +112,21 @@ namespace
 
     Player* TravelAnchor(PlayerbotAI* botAI, Player* bot)
     {
-        return FirstHuman(botAI, bot, [](Player* p) { return Travelable(p); });
+        if (Player* human = FirstHuman(botAI, bot, [](Player* p) { return Travelable(p); }))
+            return human;
+
+        // A party of random bots only (AiPlayerbot.RandomBotGroupNearby): the members travel after their leader
+        // the way they would after a player - by taxi, ferry and portal - when it flies or sails off.
+        Group* group = bot->GetGroup();
+        Player* leader = botAI->GetGroupLeader();
+        if (!group || !leader || leader == bot || !GET_PLAYERBOT_AI(leader) || !Travelable(leader))
+            return nullptr;
+
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+            if (IsHuman(ref->GetSource()))
+                return nullptr;
+
+        return leader;
     }
 
     enum class GoalStatus : uint8

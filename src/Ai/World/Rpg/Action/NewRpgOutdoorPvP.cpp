@@ -20,7 +20,9 @@ bool NewRpgOutdoorPvpAction::Execute(Event)
 
     uint32 zoneId = bot->GetZoneId();
     OutdoorPvP* outdoorPvP = sOutdoorPvPMgr->GetOutdoorPvPToZoneId(zoneId);
-    if (!outdoorPvP || zoneId == AREA_NAGRAND)
+    // Nagrand (Halaa) is no longer left out: the point only moves once the 15 guards are dead, but bots that
+    // walk in on the other side's guards fight them, and they are the "enemy players" of the Halaa quests
+    if (!outdoorPvP)
     {
         botAI->rpgInfo.ChangeToIdle();
         return false;

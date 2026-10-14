@@ -1445,8 +1445,16 @@ AiPlayerbot.botActiveAloneSmartScaleWhenMaxLevel = 80
 AiPlayerbot.RandomBotQuestIds = "3802,5505,6502,7761,7848,10277,10285,11492,13188,13189,24499,24511,24710,24712"
 
 # Randombots will group with nearby randombots to do shared quests
-# Note: Currently not functioning properly
+# Note: experimental. The strategy was switched off in the module's code ("not functioning properly") and is
+# added again only when this option is on.
 AiPlayerbot.RandomBotGroupNearby = 0
+
+# How many of the randombots gather a party of their own, in percent (0 - 20; the others can only be invited),
+# and the largest party a randombot gathers (2 - 5). The share of bots that end up in a party is roughly the
+# product of the two: 5 % x 3 = about one bot in seven; the rest stay free for players to invite.
+# Default: 5, 3
+AiPlayerbot.RandomBotGroupNearbyLeaderPct = 5
+AiPlayerbot.RandomBotGroupNearbyMaxSize = 3
 
 # Randombots will pick quests on their own and try to complete them
 # Default: 1 (enabled)

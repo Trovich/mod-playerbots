@@ -549,6 +549,8 @@ public:
     bool HasRealPlayerInGroup();
     Player* GetGroupLeader();
     uint32 GetFixedBotNumber(uint32 maxNum = 100);
+    // the same for the whole life of the bot (GetFixedBotNumber is reshuffled every activity window)
+    uint32 GetStableBotNumber(uint32 maxNum = 100);
     GrouperType GetGrouperType();
     GuilderType GetGuilderType();
     bool HasPlayerNearby(WorldPosition* pos, float range = sPlayerbotAIConfig.reactDistance);

@@ -6,6 +6,7 @@
 
 #include "LeaveGroupAction.h"
 #include "Event.h"
+#include "FollowTravelAction.h"
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotTextMgr.h"
 #include "Playerbots.h"
@@ -155,6 +156,11 @@ bool LeaveFarAwayAction::isUseful()
 
     if (bot->GetMapId() != groupLeader->GetMapId() || bot->GetDistance2d(groupLeader) >= 2 * sPlayerbotAIConfig.rpgDistance)
     {
+        // on its way to the leader by smart travel (it takes over at a quarter of this distance): not lost yet.
+        // A trip that was given up leaves the bot far away and not travelling - then it leaves.
+        if (FollowTravelCovers(botAI) && IsSmartTravelling(botAI))
+            return false;
+
         return true;
     }
 

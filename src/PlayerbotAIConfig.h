@@ -414,6 +414,8 @@ public:
     bool autoLearnQuestSpells;
     bool autoTeleportForLevel;
     bool randomBotGroupNearby;
+    uint32 randomBotGroupNearbyLeaderPct;
+    uint32 randomBotGroupNearbyMaxSize;
     int32 enableRandomBotTrading;
     uint32 tweakValue;  // Debugging config
 

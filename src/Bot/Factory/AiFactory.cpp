@@ -614,7 +614,10 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
 
             // nonCombatEngine->addStrategy("pvp", false);
             // nonCombatEngine->addStrategy("collision");
-            // nonCombatEngine->addStrategy("group");
+            // "group": invite nearby bots / guild mates (the leader), leave a party that got too far away
+            // (a member). How many bots gather a party and how large: InviteNearbyToGroupAction::isUseful.
+            if (sPlayerbotAIConfig.randomBotGroupNearby)
+                nonCombatEngine->addStrategy("group", false);
             // nonCombatEngine->addStrategy("guild");
             nonCombatEngine->addStrategy("grind", false);
 
@@ -647,7 +650,9 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
                     {
                         // nonCombatEngine->addStrategy("pvp", false);
                         // nonCombatEngine->addStrategy("collision");
-                        // nonCombatEngine->addStrategy("group");
+                        // a member of a random bot's party: only the "leave far away" part of it acts
+                        if (sPlayerbotAIConfig.randomBotGroupNearby && sRandomPlayerbotMgr.IsRandomBot(player))
+                            nonCombatEngine->addStrategy("group", false);
                         // nonCombatEngine->addStrategy("guild");
 
                         // if (sPlayerbotAIConfig.autoDoQuests)

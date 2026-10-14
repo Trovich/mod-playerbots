@@ -4650,9 +4650,27 @@ enum GrouperType
 };
 */
 
+uint32 PlayerbotAI::GetStableBotNumber(uint32 maxNum)
+{
+    if (maxNum == 0)
+        return 0;
+
+    // the hash of GetFixedBotNumber without the time slot
+    uint32 h = bot->GetGUID().GetCounter();
+    h ^= h >> 16;
+    h *= 0x7feb352d;
+    h ^= h >> 15;
+    h *= 0x846ca68b;
+    h ^= h >> 16;
+
+    return h % maxNum;
+}
+
 GrouperType PlayerbotAI::GetGrouperType()
 {
-    uint32 grouperNumber = GetFixedBotNumber(100);
+    // A stable number: with GetFixedBotNumber the type changed every activity window (30 s here) - a leader
+    // stopped being one half a minute later and a member turned "solo" and left the party it had just joined.
+    uint32 grouperNumber = GetStableBotNumber(100);
 
     if (grouperNumber < 20 && !HasGameClientMaster())
         return GrouperType::SOLO;
