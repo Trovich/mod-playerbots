@@ -146,7 +146,7 @@ bool InviteNearbyToGroupAction::isUseful()
     // them gathering groups of up to five, nearly every bot of a zone is in somebody's party and a player
     // finds nobody left to invite. Only RandomBotGroupNearbyLeaderPct of the bots really gather one - the top
     // of the same number.
-    uint32 leaderPct = std::min<uint32>(PlayerbotAIConfig::instance().randomBotGroupNearbyLeaderPct, 20);
+    uint32 leaderPct = std::min<uint32>(sPlayerbotAIConfig.randomBotGroupNearbyLeaderPct, 20);
     if (botAI->GetStableBotNumber(100) < 100 - leaderPct)
         return false;
 
@@ -162,7 +162,7 @@ bool InviteNearbyToGroupAction::isUseful()
 
         uint32 memberCount = group->GetMembersCount();
 
-        if (memberCount >= std::min<uint32>(uint8(grouperType), PlayerbotAIConfig::instance().randomBotGroupNearbyMaxSize))
+        if (memberCount >= std::min<uint32>(uint8(grouperType), sPlayerbotAIConfig.randomBotGroupNearbyMaxSize))
             return false;
     }
 
