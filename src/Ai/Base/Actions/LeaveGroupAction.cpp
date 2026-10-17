@@ -128,7 +128,7 @@ bool LeaveFarAwayAction::isUseful()
         return false;
 
     if (botAI->IsAltBot() &&
-        (!groupLeaderBotAI || IsSelfBot(groupLeader)))  // Don't leave when an altbot is grouped under a regular real player or a selfbot.
+        (!groupLeaderBotAI || IsSelfBot(groupLeader)))  // Don't leave when an altbot is grouped under a regular real player or a SelfBot.
         return false;
 
     if (botAI->GetGrouperType() == GrouperType::SOLO)
@@ -154,7 +154,7 @@ bool LeaveFarAwayAction::isUseful()
     if (abs(int32(groupLeader->GetLevel() - bot->GetLevel())) > 4)
         return true;
 
-    if (bot->GetMapId() != groupLeader->GetMapId() || bot->GetDistance2d(groupLeader) >= 2 * sPlayerbotAIConfig.rpgDistance)
+    if (bot->GetMapId() != groupLeader->GetMapId() || bot->GetDistance2d(groupLeader) >= 2 * sPlayerbotAIConfig.RpgDistance)
     {
         // on its way to the leader by smart travel (it takes over at a quarter of this distance): not lost yet.
         // A trip that was given up leaves the bot far away and not travelling - then it leaves.

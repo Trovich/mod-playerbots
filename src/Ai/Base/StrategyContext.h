@@ -44,6 +44,7 @@
 #include "RTSCStrategy.h"
 #include "RacialsStrategy.h"
 #include "RangedCombatStrategy.h"
+#include "ReactionStrategy.h"
 #include "ReturnStrategy.h"
 #include "RpgStrategy.h"
 #include "RunawayStrategy.h"
@@ -75,13 +76,14 @@ public:
         creators["ready check"] = &StrategyContext::ready_check;
         creators["force rebuff"] = &StrategyContext::force_rebuff;
         creators["dead"] = &StrategyContext::dead;
-        creators["flee"] = &StrategyContext::flee;
         creators["duel"] = &StrategyContext::duel;
         creators["start duel"] = &StrategyContext::start_duel;
         creators["kite"] = &StrategyContext::kite;
         creators["potions"] = &StrategyContext::potions;
+        creators["react"] = &StrategyContext::react;
         creators["cast time"] = &StrategyContext::cast_time;
         creators["threat"] = &StrategyContext::threat;
+        creators["flee"] = &StrategyContext::flee;
         creators["focus"] = &StrategyContext::focus;
         creators["tell target"] = &StrategyContext::tell_target;
         creators["pvp"] = &StrategyContext::pvp;
@@ -143,12 +145,13 @@ private:
     static Strategy* tell_target(PlayerbotAI* botAI) { return new TellTargetStrategy(botAI); }
     static Strategy* threat(PlayerbotAI* botAI) { return new ThreatStrategy(botAI); }
     static Strategy* focus(PlayerbotAI* botAI) { return new FocusStrategy(botAI); }
+    static Strategy* flee(PlayerbotAI* botAI) { return new FleeStrategy(botAI); }
     static Strategy* cast_time(PlayerbotAI* botAI) { return new CastTimeStrategy(botAI); }
     static Strategy* potions(PlayerbotAI* botAI) { return new UsePotionsStrategy(botAI); }
+    static Strategy* react(PlayerbotAI* botAI) { return new ReactionStrategy(botAI); }
     static Strategy* kite(PlayerbotAI* botAI) { return new KiteStrategy(botAI); }
     static Strategy* duel(PlayerbotAI* botAI) { return new DuelStrategy(botAI); }
     static Strategy* start_duel(PlayerbotAI* botAI) { return new StartDuelStrategy(botAI); }
-    static Strategy* flee(PlayerbotAI* botAI) { return new FleeStrategy(botAI); }
     static Strategy* dead(PlayerbotAI* botAI) { return new DeadStrategy(botAI); }
     static Strategy* racials(PlayerbotAI* botAI) { return new RacialsStrategy(botAI); }
     static Strategy* loot(PlayerbotAI* botAI) { return new LootNonCombatStrategy(botAI); }
@@ -218,7 +221,6 @@ public:
         creators["follow"] = &MovementStrategyContext::follow_master;
         creators["stay"] = &MovementStrategyContext::stay;
         creators["runaway"] = &MovementStrategyContext::runaway;
-        creators["flee from adds"] = &MovementStrategyContext::flee_from_adds;
         creators["guard"] = &MovementStrategyContext::guard;
     }
 
@@ -227,7 +229,6 @@ private:
     static Strategy* follow_master(PlayerbotAI* botAI) { return new FollowMasterStrategy(botAI); }
     static Strategy* stay(PlayerbotAI* botAI) { return new StayStrategy(botAI); }
     static Strategy* runaway(PlayerbotAI* botAI) { return new RunawayStrategy(botAI); }
-    static Strategy* flee_from_adds(PlayerbotAI* botAI) { return new FleeFromAddsStrategy(botAI); }
 };
 
 class AssistStrategyContext : public NamedObjectContext<Strategy>

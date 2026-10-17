@@ -45,7 +45,7 @@ bool RendDebuffOnAttackerTrigger::IsActive()
 
 bool BloodrageBuffTrigger::IsActive()
 {
-    return AI_VALUE2(uint8, "health", "self target") >= sPlayerbotAIConfig.mediumHealth &&
+    return AI_VALUE2(uint8, "health", "self target") >= sPlayerbotAIConfig.MediumHealth &&
            AI_VALUE2(uint8, "rage", "self target") < 20;
 }
 

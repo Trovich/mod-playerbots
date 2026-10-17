@@ -101,6 +101,12 @@ void NewRpgInfo::OnInfiltrateDeath(uint32 maxDeaths)
     infiltrate->patrolFails = 0;
 }
 
+void NewRpgInfo::ChangeToDoGather()
+{
+    startT = getMSTime();
+    data = DoGather{};
+}
+
 void NewRpgInfo::ChangeToRest()
 {
     startT = getMSTime();
@@ -145,6 +151,7 @@ NewRpgStatus NewRpgInfo::StatusFromString(std::string const& name)
     if (name == "travel ferry")   return RPG_TRAVEL_FERRY;
     if (name == "outdoor pvp")    return RPG_OUTDOOR_PVP;
     if (name == "infiltrate")     return RPG_INFILTRATE;
+    if (name == "do gather")      return RPG_DO_GATHER;
     return RPG_STATUS_END;
 }
 
@@ -163,6 +170,7 @@ NewRpgStatus NewRpgInfo::GetStatus()
         if constexpr (std::is_same_v<T, TravelFerry>) return RPG_TRAVEL_FERRY;
         if constexpr (std::is_same_v<T, OutdoorPvP>) return RPG_OUTDOOR_PVP;
         if constexpr (std::is_same_v<T, Infiltrate>) return RPG_INFILTRATE;
+        if constexpr (std::is_same_v<T, DoGather>) return RPG_DO_GATHER;
         return RPG_IDLE;
     }, data);
 }
@@ -255,6 +263,15 @@ std::string NewRpgInfo::ToString()
                 << (arg.phase == Infiltrate::Phase::Travel ? "travel"
                                                           : (arg.phase == Infiltrate::Phase::Raid ? "raid" : "recover"));
             out << "\ndeaths: " << uint32(arg.deaths);
+        }
+        else if constexpr (std::is_same_v<T, DoGather>)
+        {
+            out << "DO_GATHER";
+            out << "\nnodeSpawnId: " << arg.nodeSpawnId;
+            out << "\nnodePos: " << arg.nodePos.GetMapId() << " " << arg.nodePos.GetPositionX() << " "
+                << arg.nodePos.GetPositionY() << " " << arg.nodePos.GetPositionZ();
+            out << "\nvisited: " << arg.visited.size();
+            out << "\nlastReach: " << (arg.lastReach ? GetMSTimeDiffToNow(arg.lastReach) : 0);
         }
         else
             out << "UNKNOWN";

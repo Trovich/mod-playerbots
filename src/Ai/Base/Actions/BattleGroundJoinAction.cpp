@@ -311,7 +311,7 @@ bool BGJoinAction::shouldJoinBg(BattlegroundQueueTypeId queueTypeId, Battlegroun
 bool BGJoinAction::isUseful()
 {
     // do not try if BG bots disabled
-    if (!sPlayerbotAIConfig.randomBotJoinBG)
+    if (!sPlayerbotAIConfig.RandomBotJoinBG)
         return false;
 
     // can't queue while in BG/Arena
@@ -934,7 +934,7 @@ bool BGStatusAction::Execute(Event event)
         if (isArena)
             timer = TIME_TO_AUTOREMOVE;
         else
-            timer = TIME_TO_AUTOREMOVE + 1000 * (bg->GetMaxPlayersPerTeam() * 8);
+            timer = TIME_TO_AUTOREMOVE + IN_MILLISECONDS * (bg->GetMaxPlayersPerTeam() * 8);
 
         if (Time2 > timer && isArena)  // disabled for BG
             leaveQ = true;

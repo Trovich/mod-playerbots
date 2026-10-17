@@ -14,7 +14,7 @@
 class Player;
 class PlayerbotAI;
 
-// When DungeonFinder.SkipTeleport + AiPlayerbot.LfgWalkToDungeon are on and this bot is in an
+// When DungeonFinder.SkipTeleport + Playerbots.LfgWalkToDungeon are on and this bot is in an
 // LFG group that has a dungeon it has not entered yet: fills `outside` (staging just outside
 // the instance portal) and `inside` (the instance-side start point) and returns true.
 bool LfgWalkToDungeonTarget(Player* bot, WorldPosition& outside, WorldPosition& inside);

@@ -115,7 +115,7 @@ namespace
         if (Player* human = FirstHuman(botAI, bot, [](Player* p) { return Travelable(p); }))
             return human;
 
-        // A party of random bots only (AiPlayerbot.RandomBotGroupNearby): the members travel after their leader
+        // A party of random bots only (Playerbots.RandomBotGroupNearby): the members travel after their leader
         // the way they would after a player - by taxi, ferry and portal - when it flies or sails off.
         Group* group = bot->GetGroup();
         Player* leader = botAI->GetGroupLeader();
@@ -1357,9 +1357,9 @@ bool FollowTravelAction::StepTravel(FollowTravelState& st, WorldPosition const& 
             {
                 int32 slotIndex = botAI->GetGroupSlotIndex(bot);
                 uint32 const slot = slotIndex > 0 ? static_cast<uint32>(slotIndex) : 0u;
-                uint32 delay = sPlayerbotAIConfig.botTaxiDelayMin + slot * sPlayerbotAIConfig.botTaxiGapMs +
-                               urand(0, sPlayerbotAIConfig.botTaxiGapJitterMs);
-                delay = std::min(delay, sPlayerbotAIConfig.botTaxiDelayMax);
+                uint32 delay = sPlayerbotAIConfig.BotTaxiDelayMin + slot * sPlayerbotAIConfig.BotTaxiGapMs +
+                               urand(0, sPlayerbotAIConfig.BotTaxiGapJitterMs);
+                delay = std::min(delay, sPlayerbotAIConfig.BotTaxiDelayMax);
                 st.taxiTakeoffAtMs = now + delay;
                 return true;
             }

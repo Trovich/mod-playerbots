@@ -7,6 +7,8 @@
 #ifndef PLAYERBOTS_NEWRPGINFO_H
 #define PLAYERBOTS_NEWRPGINFO_H
 
+#include <unordered_set>
+
 #include "Define.h"
 #include "ObjectGuid.h"
 #include "ObjectMgr.h"
@@ -102,6 +104,16 @@ struct NewRpgInfo
         uint8 patrolFails{0};           // consecutive spots it could not find a way to
         uint32 recoverSinceMs{0};       // when the recovery began (0: not begun)
     };
+    // RPG_DO_GATHER
+    struct DoGather
+    {
+        ObjectGuid::LowType nodeSpawnId{0};
+        WorldPosition nodePos{};
+        std::unordered_set<ObjectGuid::LowType> visited;
+        uint32 lastReach{0};
+        uint32 lastPassiveCheck{0};
+        ObjectGuid::LowType lastSwitchedFrom{0};
+    };
     struct Idle
     {
     };
@@ -126,7 +138,8 @@ struct NewRpgInfo
         TravelFlight,
         TravelFerry,
         OutdoorPvP,
-        Infiltrate
+        Infiltrate,
+        DoGather
     >;
     RpgData data;
 
@@ -145,6 +158,7 @@ struct NewRpgInfo
     // The bot has died. While it is on an infiltration this counts against the raid: it goes to recover, or, once
     // `maxDeaths` (0 = no limit) is reached, the raid is over and the bot goes idle.
     void OnInfiltrateDeath(uint32 maxDeaths);
+    void ChangeToDoGather();
     void ChangeToRest();
     void ChangeToIdle();
     bool CanChangeTo(NewRpgStatus status);

@@ -19,7 +19,7 @@ class PlayerbotAI;
 //   Raid    - in the city, on foot and stealthed: walks from banker to banker, and whenever an enemy player or a
 //             guard is within reach it opens on it and hands the fight to the normal combat engine. When the fight
 //             is over the bot stealths again and carries on. The raid goes on until the bot has died as many times
-//             as AiPlayerbot.InfiltrateMaxDeaths allows (counted in PlayerbotAI, which calls
+//             as Playerbots.InfiltrateMaxDeaths allows (counted in PlayerbotAI, which calls
 //             NewRpgInfo::OnInfiltrateDeath); after the last death the bot goes idle.
 //   Recover - after a death: home (its homebind, when it was killed in or near the city), eat and drink until
 //             it is well again, then back to Travel for another go.

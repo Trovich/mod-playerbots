@@ -20,13 +20,4 @@ public:
     std::string const getName() override { return "flee"; };
 };
 
-class FleeFromAddsStrategy : public Strategy
-{
-public:
-    FleeFromAddsStrategy(PlayerbotAI* botAI) : Strategy(botAI) {}
-
-    void InitTriggers(std::vector<TriggerNode*>& triggers) override;
-    std::string const getName() override { return "flee from adds"; };
-};
-
 #endif

@@ -16,7 +16,7 @@ class Player;
 class PlayerbotAI;
 
 // True if a mid-trip bot should keep running through the combat it just picked up (trash
-// leashes once outrun) rather than stop and fight. Gated by AiPlayerbot.SmartTravelRunPastEnemies
+// leashes once outrun) rather than stop and fight. Gated by Playerbots.SmartTravelRunPastEnemies
 // and a minimum health %, and always false against players / elites / bosses.
 bool TravelRunsThroughCombat(PlayerbotAI* botAI, Player* bot);
 
@@ -27,7 +27,7 @@ bool FollowTravelCovers(PlayerbotAI* botAI);
 // True while the shared long-distance traveller - FollowTravelAction, LfgTravelToDungeonAction or
 // NewRpgInfiltrateAction, whichever is driving this bot right now - is actively stepping through a trip. A
 // proactive "go pick a fight with this" action (grinding on the way) should stand down while this is true and
-// AiPlayerbot.SmartTravelRunPastEnemies is on: the trip is meant to run past ordinary trash, not detour into a
+// Playerbots.SmartTravelRunPastEnemies is on: the trip is meant to run past ordinary trash, not detour into a
 // kill. A mob that lands a hit on its own is a different matter - that already runs through
 // FollowTravelTrigger/TravelRunsThroughCombat, which this does not touch.
 bool IsSmartTravelling(PlayerbotAI* botAI);
